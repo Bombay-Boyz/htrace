@@ -1,0 +1,9 @@
+resolver: lts-23.28
+
+packages:
+  - .
+
+# All listed packages are in LTS-23.28; no extra-deps needed.
+
+ghc-options:
+  "$locals": -haddock
