@@ -1,0 +1,102 @@
+# ----------------------------
+# Haskell: Stack
+# ----------------------------
+.stack-work/
+
+# Stack executables
+/.stack-work
+stack.yaml.lock
+
+# ----------------------------
+# Haskell: Cabal
+# ----------------------------
+dist/
+dist-newstyle/
+cabal-dev/
+*.o
+*.hi
+*.chi
+*.chs.h
+*.dyn_o
+*.dyn_hi
+
+# Cabal sandbox
+.cabal-sandbox/
+cabal.sandbox.config
+
+# Cabal local config
+cabal.project.local
+cabal.project.local~
+cabal.project.freeze
+
+# User-specific Cabal config
+~/.cabal/
+cabal.config
+
+# ----------------------------
+# GHC / HLS / REPL
+# ----------------------------
+ghc.environment.*
+.ghc.environment.*
+
+# GHCi
+ghci.history
+
+# Haskell Language Server
+.hie/
+*.hie
+
+# HPC coverage
+*.tix
+*.mix
+hpc/
+
+# Profiling
+*.prof
+*.aux
+*.hp
+*.eventlog
+
+# Haddock
+doc/html/
+
+# ----------------------------
+# Nix
+# ----------------------------
+result
+result-*
+
+# ----------------------------
+# Editors / IDEs
+# ----------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Emacs
+\#*\#
+.\#*
+
+# ----------------------------
+# OS files
+# ----------------------------
+.DS_Store
+Thumbs.db
+
+# ----------------------------
+# Direnv
+# ----------------------------
+.direnv/
+
+# ----------------------------
+# Env / secrets
+# ----------------------------
+.env
+.env.*
+
+# ----------------------------
+# Logs
+# ----------------------------
+*.log
