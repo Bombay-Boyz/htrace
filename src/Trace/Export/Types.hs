@@ -4,10 +4,8 @@ module Trace.Export.Types
     -- * Export results
   , ExportResult (..)
   , ExportError (..)
-  , HttpStatus
+  , HttpStatus (..)
   , mkHttpStatus
-  , unHttpStatus
-    -- * Init-time errors
   , ExporterInitError (..)
   , BatchConfigError (..)
     -- * Concrete exporters
@@ -19,17 +17,14 @@ module Trace.Export.Types
   , silentLogger
   ) where
 
-import Control.Concurrent.STM (atomically)
-import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar', readTVarIO)
-import Data.IORef (newIORef, modifyIORef', readIORef)
+
 import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
 import Data.Text (Text)
-import Data.Text qualified as Text
 import Data.Text.IO qualified as Text
 import Data.Time (NominalDiffTime)
 import System.IO (stderr)
-
+import Control.Concurrent.STM (atomically, modifyTVar', newTVarIO, readTVarIO)
 import Trace.Core (FinishedSpan)
 
 -- ---------------------------------------------------------------------------

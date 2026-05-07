@@ -11,7 +11,6 @@ module Trace.Propagation
   ) where
 
 import Data.ByteString (ByteString)
-import Data.ByteString qualified as BS
 import Data.ByteString.Base16 qualified as Base16
 import Data.CaseInsensitive qualified as CI
 import Data.Char (ord, chr)
@@ -74,11 +73,9 @@ parseTraceparent t =
                                (SpanContext traceId spanId Nothing f)
     _ -> PropagationInvalid (MalformedHeader t)
   where
-    -- Version must be exactly 2 lowercase hex digits and not "ff".
-    validVersion v =
-      Text.length v == 2
-        && Text.all isLowerHexDigit v
-        && v /= "ff"
+    -- v0.1 only accepts version "00". All other versions including "ff"
+    -- (W3C reserved) are rejected. Future version support is a v0.2 item.
+    validVersion v = v == "00"
 
     parseFlags f
       | Text.length f == 2 && Text.all isHexDigit f =
@@ -143,11 +140,6 @@ isHexDigit c =
   (c >= '0' && c <= '9')
     || (c >= 'a' && c <= 'f')
     || (c >= 'A' && c <= 'F')
-
--- | Like 'isHexDigit' but rejects uppercase — used for version validation
--- where the W3C spec requires lowercase.
-isLowerHexDigit :: Char -> Bool
-isLowerHexDigit c = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
 
 hexToInt :: Text -> Int
 hexToInt = Text.foldl' (\acc c -> acc * 16 + hexVal c) 0

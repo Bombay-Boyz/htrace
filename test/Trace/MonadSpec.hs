@@ -1,20 +1,14 @@
 module Trace.MonadSpec (spec) where
 
-import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.MVar
-import Control.Concurrent.STM (readTVarIO)
-import Control.Monad (forM_, replicateM, void)
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
-import Data.IORef (newIORef, readIORef, writeIORef)
-import Data.List.NonEmpty qualified as NE
-import Data.Text qualified as Text
-import Hedgehog (forAll, (===))
-import Hedgehog qualified as H
-import Hedgehog.Gen qualified as Gen
-import Hedgehog.Range qualified as Range
-import Test.Hspec
-import Test.Hspec.Hedgehog (hedgehog)
 import Control.Monad.Reader (runReaderT)
+import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
+import Data.Text qualified as Text
+import Test.Hspec
+
 import Trace.Attributes
 import Trace.Core
 import Trace.Export.Types
@@ -22,7 +16,7 @@ import Trace.Monad
 import Trace.Generators
 
 -- ---------------------------------------------------------------------------
--- Test helpers
+-- Helpers
 -- ---------------------------------------------------------------------------
 
 mkTestTracer :: SpanExporter -> Tracer
@@ -130,8 +124,10 @@ spec = do
         _ <- setStatusError sp "something failed"
         pure ()
       case fsStatus fs of
-        StatusError em -> unErrorMessage em `shouldBe` "something failed"
-        other          -> expectationFailure ("expected StatusError, got: " <> show other)
+        StatusError em ->
+          unErrorMessage em `shouldBe` "something failed"
+        other ->
+          expectationFailure ("expected StatusError, got: " <> show other)
 
     it "falls back to <unspecified error> for blank message" $ do
       fs <- withCapturedSpan $ \_ sp -> do
@@ -162,57 +158,119 @@ spec = do
       result `shouldBe` Left SpanAlreadyEnded
 
   describe "recordException" $ do
-    it "sets exception attributes" $ do
-      fs <- withCapturedSpan $ \_ sp -> do
+    it "sets exception.type and exception.message attributes on event" $ do
+      fs <- withCapturedSpan $ \_ sp ->
         void $ recordException sp (userError "boom")
-      let ev = head (fsEvents fs)
+      let ev = case fsEvents fs of
+                 (e:_) -> e
+                 []    -> error "expected at least one event"
+      eventName ev `shouldBe` "exception"
       lookupAttr (AttrKey "exception.message") (eventAttributes ev)
         `shouldSatisfy` (\r -> case r of
           Right (AttrString m) -> "boom" `Text.isInfixOf` m
-          _ -> False)
+          _                    -> False)
 
     it "sets span status to StatusError" $ do
-      fs <- withCapturedSpan $ \_ sp -> do
+      fs <- withCapturedSpan $ \_ sp ->
         void $ recordException sp (userError "boom")
       case fsStatus fs of
         StatusError _ -> pure ()
-        _             -> expectationFailure "expected StatusError"
+        other         ->
+          expectationFailure ("expected StatusError, got: " <> show other)
 
   describe "inSpanM" $ do
     it "child span inherits trace ID from parent" $ do
       (exporter, readAll) <- memoryExporter
       let tracer = mkTestTracer exporter
-          ctx = TraceContext Nothing tracer
+          ctx    = TraceContext Nothing tracer
       runReaderT
-        (inSpanM "parent" Internal mempty $ \_ ->
-           inSpanM "child" Internal mempty $ \_ -> pure ())
+        ( inSpanM "parent" Internal mempty $ \_ ->
+            inSpanM "child" Internal mempty $ \_ -> pure ()
+        )
         ctx
       spans <- readAll
+      length spans `shouldBe` 2
       let traceIds = map (scTraceId . fsContext) spans
-      length (filter (== head traceIds) traceIds) `shouldBe` 2
+      case traceIds of
+        (t:ts) -> length (filter (== t) ts) `shouldBe` 1
+        []     -> expectationFailure "no spans exported"
 
     it "child span has correct parent ID" $ do
       (exporter, readAll) <- memoryExporter
       let tracer = mkTestTracer exporter
-          ctx = TraceContext Nothing tracer
+          ctx    = TraceContext Nothing tracer
       runReaderT
-        (inSpanM "parent" Internal mempty $ \parent ->
-           inSpanM "child" Internal mempty $ \_ -> do
-             parentCtx <- getCurrentSpanContext
-             liftIO $ case parentCtx of
-               Just ctx -> do
-                 scTraceId ctx `shouldBe` scTraceId (spanContext parent)
-                 scParentId ctx `shouldBe`
-                   Just (scSpanId (spanContext parent))
-               Nothing ->
-                 expectationFailure "Expected active span context")
+        ( inSpanM "parent" Internal mempty $ \parent ->
+            inSpanM "child" Internal mempty $ \_ -> do
+              ambientCtx <- getCurrentSpanContext
+              liftIO $ case ambientCtx of
+                Nothing -> expectationFailure "expected a span context"
+                Just c  ->
+                  scParentId c
+                    `shouldBe` Just (scSpanId (spanContext parent))
+        )
         ctx
       spans <- readAll
-      let [child, parent] = spans
+      (child, parent) <- case spans of
+        [c, p] -> pure (c, p)
+        _      -> fail ("expected 2 spans, got " <> show (length spans))
       scParentId (fsContext child)
         `shouldBe` Just (scSpanId (fsContext parent))
 
   describe "flush" $ do
-    it "returns Right ()" $ do
+    it "returns Right () on a noop exporter" $ do
       let tracer = mkTestTracer noopExporter
-      flush tracer `shouldReturn` Right ()
+      result <- flush tracer
+      result `shouldBe` Right ()
+
+  describe "properties" $ do
+    it "inSpan always produces start <= end" $
+      prop_inSpan_start_le_end
+
+    it "setSpanAttr acknowledged writes survive in snapshot" $
+      prop_setSpanAttr_atomic
+
+-- ---------------------------------------------------------------------------
+-- Properties
+-- ---------------------------------------------------------------------------
+
+prop_inSpan_start_le_end :: IO ()
+prop_inSpan_start_le_end = do
+  (exporter, readAll) <- memoryExporter
+  let tracer = mkTestTracer exporter
+  inSpan tracer "t" Internal mempty (\_ -> pure ())
+  spans <- readAll
+  case spans of
+    [fs] -> fsStartTime fs `shouldSatisfy` (<= fsEndTime fs)
+    _    -> fail "expected exactly one span"
+
+prop_setSpanAttr_atomic :: IO ()
+prop_setSpanAttr_atomic = do
+  let n = 20
+  (exporter, readAll) <- memoryExporter
+  let tracer = mkTestTracer exporter
+  ackedKeys <- newIORef ([] :: [AttrKey])
+  inSpan tracer "t" Internal mempty $ \sp -> do
+    mvars <- sequence (replicate n newEmptyMVar)
+    mapM_
+      ( \(i, mv) -> forkIO $ do
+          let k = AttrKey ("k" <> Text.pack (show (i :: Int)))
+          r <- setSpanAttr sp k (AttrInt (fromIntegral i))
+          case r of
+            Right () -> modifyIORef' ackedKeys (k :)
+            Left  _  -> pure ()
+          putMVar mv ()
+      )
+      (zip [0..] mvars)
+    mapM_ takeMVar mvars
+  acked <- readIORef ackedKeys
+  spans <- readAll
+  case spans of
+    [fs] ->
+      mapM_
+        ( \k ->
+            lookupAttr k (fsAttributes fs)
+              `shouldNotBe` Left (MissingAttr k)
+        )
+        acked
+    _ -> fail "expected exactly one span"

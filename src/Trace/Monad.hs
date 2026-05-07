@@ -21,7 +21,7 @@ module Trace.Monad
   , modifySpan
   ) where
 
-import Control.Concurrent.STM (atomically, readTVar, writeTVar, readTVarIO, newTVarIO)
+import Control.Concurrent.STM (atomically, readTVar, writeTVar, newTVarIO)
 import Control.Exception (Exception, SomeException, displayException)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ReaderT, ask, asks, runReaderT)
@@ -35,8 +35,6 @@ import UnliftIO.Exception (bracket, try)
 import Trace.Attributes
 import Trace.Core
 import Trace.Export.Types
-import Trace.Core (ErrorMessage, mkErrorMessage, unErrorMessage)
-
 -- ---------------------------------------------------------------------------
 -- Tracer
 -- ---------------------------------------------------------------------------

@@ -99,9 +99,9 @@ spec = do
 
   describe "HttpStatus Ord" $ do
     it "ordering is consistent with Int" $ do
-      let Just s200 = mkHttpStatus 200
-          Just s404 = mkHttpStatus 404
-          Just s500 = mkHttpStatus 500
+      let s200 = maybe (error "bad 200") id (mkHttpStatus 200)
+          s404 = maybe (error "bad 404") id (mkHttpStatus 404)
+          s500 = maybe (error "bad 500") id (mkHttpStatus 500)
       compare s200 s404 `shouldBe` LT
       compare s500 s404 `shouldBe` GT
       compare s200 s200 `shouldBe` EQ
