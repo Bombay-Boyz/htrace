@@ -64,7 +64,6 @@ library
     , text                 >= 2.0  && < 2.2
     , time                 >= 1.12 && < 1.15
     , unliftio             >= 0.2  && < 0.3
-    , validation           >= 1.1  && < 1.2
     , containers           >= 0.6  && < 0.8
     , mtl
 
