@@ -15,6 +15,8 @@ module Trace.Monad
   , setStatusError
   , addEvent
   , recordException
+  , withTracing
+  , samplerFromConfig
     -- * Utilities
   , getCurrentSpanContext
   , flush
@@ -31,7 +33,9 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Typeable (typeOf)
 import UnliftIO.Exception (bracket, try)
-
+import Trace.Config
+import Trace.Export.Batch
+import Trace.Export.Otlp (otlpExporter)
 import Trace.Attributes
 import Trace.Core
 import Trace.Export.Types
@@ -231,3 +235,55 @@ getCurrentSpanContext = asks tcCurrentSpanContext
 -- | Flush all buffered spans in the tracer's exporter.
 flush :: Tracer -> IO (Either ExportError ())
 flush = exporterFlush . tracerExporter
+
+
+-- ---------------------------------------------------------------------------
+-- withTracing
+-- ---------------------------------------------------------------------------
+
+-- | Construct a 'Tracer' from a 'TracingConfig', run the given action,
+-- and guarantee the exporter is flushed and shut down on exit —
+-- whether the action returns normally or throws.
+--
+-- Returns 'Left' if the exporter or batcher could not be initialised.
+withTracing
+  :: TracingConfig
+  -> (Tracer -> IO a)
+  -> IO (Either ExporterInitError a)
+withTracing cfg action = do
+  innerR <- case configExporter cfg of
+    NoopExporter   -> pure (Right noopExporter)
+    OtlpExporter c -> otlpExporter c
+  case innerR of
+    Left e     -> pure (Left e)
+    Right inner -> do
+      let batchCfg = defaultBatchConfig
+            { onDroppedSpans =
+                defaultOnDroppedSpans (configLogger cfg)
+            }
+      batchedR <- batchExporter batchCfg inner
+      case batchedR of
+        Left be      ->
+          exporterShutdown inner
+            *> pure (Left (ExporterBatchInit be))
+        Right batched -> do
+          let tracer = Tracer
+                { tracerScope    = InstrumentationScope
+                                     "htrace" (Just "0.1.0.0")
+                , tracerSampler  = samplerFromConfig (configSampler cfg)
+                , tracerExporter = batched
+                , tracerClock    = systemClock
+                , tracerLogger   = configLogger cfg
+                }
+          fmap Right $
+            bracket
+              (pure ())
+              (\_ -> exporterShutdown batched)
+              (\_ -> action tracer)
+
+-- | Convert a 'SamplerConfig' to a 'Sampler'.
+samplerFromConfig :: SamplerConfig -> Sampler
+samplerFromConfig = \case
+  AlwaysSample              -> alwaysOnSampler
+  NeverSample               -> alwaysOffSampler
+  TraceIdRatio sr -> traceIdRatioSampler (unSampleRate sr)
