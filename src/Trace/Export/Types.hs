@@ -123,9 +123,9 @@ memoryExporter :: IO (SpanExporter, IO [FinishedSpan])
 memoryExporter = do
   tvar <- newTVarIO ([] :: [FinishedSpan])
   let doExport ne = do
-        atomically $ modifyTVar' tvar (<> NE.toList ne)
+        atomically $ modifyTVar' tvar (NE.toList ne <>)
         pure (ExportSuccess (NE.length ne))
-      readAll = readTVarIO tvar
+      readAll = fmap reverse (readTVarIO tvar)
   pure
     ( SpanExporter
         { exporterExport   = doExport
