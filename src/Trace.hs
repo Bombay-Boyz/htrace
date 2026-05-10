@@ -14,6 +14,7 @@ module Trace
   , inSpan
   , inSpanM
   , Span
+  , readSpanInternals
   , SpanName
   , mkSpanName
   , SpanKind (..)

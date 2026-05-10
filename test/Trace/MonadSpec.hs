@@ -230,6 +230,56 @@ spec = do
     it "setSpanAttr acknowledged writes survive in snapshot" $
       prop_setSpanAttr_atomic
 
+  -- -------------------------------------------------------------------------
+  -- Phase R1: readSpanInternals and SpanName encapsulation
+  -- -------------------------------------------------------------------------
+
+  describe "readSpanInternals" $ do
+    it "returns SpanActive while span is open" $ do
+      (exporter, _) <- memoryExporter
+      let tracer = mkTestTracer exporter
+      inSpan tracer "r1-active" Internal mempty $ \sp -> do
+        si <- readSpanInternals sp
+        case siState si of
+          SpanActive _ -> pure ()
+          other        -> expectationFailure
+            ("expected SpanActive, got: " <> show other)
+
+    it "reflects setSpanAttr immediately" $ do
+      (exporter, _) <- memoryExporter
+      let tracer = mkTestTracer exporter
+      inSpan tracer "r1-attr" Internal mempty $ \sp -> do
+        result <- setSpanAttr sp (AttrKey "key1") (AttrString "val1")
+        result `shouldBe` Right ()
+        si <- readSpanInternals sp
+        lookupAttr (AttrKey "key1") (siAttributes si)
+          `shouldBe` Right (AttrString "val1")
+
+    it "shows exported span has StatusUnset when no status set" $ do
+      (exporter, readAll) <- memoryExporter
+      let tracer = mkTestTracer exporter
+      inSpan tracer "r1-ended" Internal mempty (\_ -> pure ())
+      spans <- readAll
+      case spans of
+        [fs] -> fsStatus fs `shouldBe` StatusUnset
+        _    -> fail ("expected exactly 1 span, got " <> show (length spans))
+
+  describe "SpanName encapsulation" $ do
+    it "mkSpanName rejects empty text" $
+      mkSpanName "" `shouldBe` Nothing
+
+    it "mkSpanName rejects whitespace-only text" $
+      mkSpanName "   " `shouldBe` Nothing
+
+    it "mkSpanName accepts non-blank text" $
+      mkSpanName "checkout" `shouldBe` Just (SpanName "checkout")
+
+    it "IsString instance falls back for empty string literal" $
+      unSpanName ("" :: SpanName) `shouldBe` "<unnamed-span>"
+
+    it "IsString instance falls back for whitespace-only literal" $
+      unSpanName ("   " :: SpanName) `shouldBe` "<unnamed-span>"
+
 -- ---------------------------------------------------------------------------
 -- Properties
 -- ---------------------------------------------------------------------------

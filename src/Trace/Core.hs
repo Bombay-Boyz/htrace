@@ -34,6 +34,7 @@ module Trace.Core
   , SpanError (..)
   , SpanInternals (..)
   , Span (..)
+  , readSpanInternals
   , FinishedSpan (..)
     -- * Instrumentation scope
   , InstrumentationScope (..)
@@ -48,7 +49,7 @@ module Trace.Core
   , systemClock
   ) where
 
-import Control.Concurrent.STM (TVar)
+import Control.Concurrent.STM (TVar, readTVarIO)
 import Crypto.Random (getRandomBytes)
 import Data.Bits (clearBit, setBit, testBit)
 import Data.ByteString (ByteString)
@@ -289,3 +290,9 @@ newtype Clock = Clock { clockNow :: IO UTCTime }
 
 systemClock :: Clock
 systemClock = Clock getCurrentTime
+
+-- | Read a consistent snapshot of a live span's internals.
+-- This is the only sanctioned read path for code outside this package.
+-- Writing is only possible through 'modifySpan' in "Trace.Monad".
+readSpanInternals :: Span -> IO SpanInternals
+readSpanInternals = readTVarIO . spanInternals
