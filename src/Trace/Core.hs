@@ -45,6 +45,8 @@ module Trace.Core
   , alwaysOnSampler
   , alwaysOffSampler
   , traceIdRatioSampler
+  , parentBasedSampler
+  , traceIdWord64
     -- * Clock
   , Clock (..)
   , systemClock
@@ -276,17 +278,48 @@ alwaysOnSampler = Sampler (\_ _ _ _ _ -> RecordAndSample)
 alwaysOffSampler :: Sampler
 alwaysOffSampler = Sampler (\_ _ _ _ _ -> Drop)
 
+-- | Sample spans deterministically by trace-id using exact integer arithmetic.
+-- The threshold is computed as @floor(rate * 2^64)@ using 'Integer' to avoid
+-- 'Double' precision loss. A trace is sampled iff its first 8 bytes
+-- (big-endian 'Word64') are strictly less than the threshold.
+--
+-- The rate is clamped to [0.0, 1.0] before use.
+-- rate = 0.0 → nothing sampled; rate = 1.0 → all sampled.
 traceIdRatioSampler :: Double -> Sampler
-traceIdRatioSampler r = Sampler $ \_ tid _ _ _ ->
-  if traceIdRatio tid <= r then RecordAndSample else Drop
-
-traceIdRatio :: TraceId -> Double
-traceIdRatio (TraceId bs) =
-  fromIntegral (firstWord64BE bs) / fromIntegral (maxBound :: Word64)
+traceIdRatioSampler rate = Sampler $ \_ tid _ _ _ ->
+  if traceIdWord64 tid < threshold then RecordAndSample else Drop
   where
-    firstWord64BE :: ByteString -> Word64
-    firstWord64BE =
-      BS.foldl' (\acc b -> acc * 256 + fromIntegral b) 0 . BS.take 8
+    clamped :: Double
+    clamped = max 0.0 (min 1.0 rate)
+    threshold :: Word64
+    threshold
+      | clamped <= 0.0 = 0
+      | clamped >= 1.0 = maxBound
+      | otherwise      =
+          fromIntegral
+            ( floor
+                ( toRational clamped
+                  * (toRational (maxBound :: Word64) + 1)
+                ) :: Integer
+            )
+
+-- | Extract the first 8 bytes of a 'TraceId' as a big-endian 'Word64'.
+-- Exported for testing.
+traceIdWord64 :: TraceId -> Word64
+traceIdWord64 (TraceId bs) =
+  BS.foldl' (\acc b -> acc * 256 + fromIntegral b) 0 (BS.take 8 bs)
+
+-- | Respect the parent span's sampling decision when a parent context exists.
+-- For root spans (no parent), delegates to the given sampler.
+-- Sampled parent → 'RecordAndSample'; unsampled parent → 'Drop'.
+parentBasedSampler :: Sampler -> Sampler
+parentBasedSampler rootSampler = Sampler $ \mParent tid name kind attrs_ ->
+  case mParent of
+    Nothing     -> runSampler rootSampler Nothing tid name kind attrs_
+    Just parent ->
+      if isSampled (scTraceFlags parent)
+        then RecordAndSample
+        else Drop
 
 -- ---------------------------------------------------------------------------
 -- Clock

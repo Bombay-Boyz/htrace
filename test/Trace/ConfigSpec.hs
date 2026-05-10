@@ -244,6 +244,52 @@ spec = around_ withCleanEnv $ do
             Right _ ->
               expectationFailure "expected Left"
 
+      it "sets ParentBased AlwaysSample for 'parentbased_always_on'" $ do
+        withEnvVars
+          [ ("OTEL_TRACES_EXPORTER", "none")
+          , ("OTEL_TRACES_SAMPLER",  "parentbased_always_on")
+          ] $ do
+          result <- fromEnv
+          case result of
+            Right cfg -> configSampler cfg `shouldBe` ParentBased AlwaysSample
+            Left errs -> expectationFailure (show errs)
+
+      it "sets ParentBased NeverSample for 'parentbased_always_off'" $ do
+        withEnvVars
+          [ ("OTEL_TRACES_EXPORTER", "none")
+          , ("OTEL_TRACES_SAMPLER",  "parentbased_always_off")
+          ] $ do
+          result <- fromEnv
+          case result of
+            Right cfg -> configSampler cfg `shouldBe` ParentBased NeverSample
+            Left errs -> expectationFailure (show errs)
+
+      it "sets ParentBased TraceIdRatio for 'parentbased_traceidratio' with valid arg" $ do
+        withEnvVars
+          [ ("OTEL_TRACES_EXPORTER",    "none")
+          , ("OTEL_TRACES_SAMPLER",     "parentbased_traceidratio")
+          , ("OTEL_TRACES_SAMPLER_ARG", "0.25")
+          ] $ do
+          result <- fromEnv
+          case result of
+            Right cfg ->
+              case configSampler cfg of
+                ParentBased (TraceIdRatio sr) -> unSampleRate sr `shouldBe` 0.25
+                other -> expectationFailure ("expected ParentBased TraceIdRatio, got: " <> show other)
+            Left errs -> expectationFailure (show errs)
+
+      it "returns MissingRequiredVar for 'parentbased_traceidratio' without arg" $ do
+        withEnvVars
+          [ ("OTEL_TRACES_EXPORTER", "none")
+          , ("OTEL_TRACES_SAMPLER",  "parentbased_traceidratio")
+          ] $ do
+          result <- fromEnv
+          case result of
+            Left errs ->
+              any isMissingVar (NE.toList errs) `shouldBe` True
+            Right _ ->
+              expectationFailure "expected Left"
+
     describe "OTEL_SERVICE_NAME" $ do
       it "sets service.name in resource" $ do
         withEnvVars

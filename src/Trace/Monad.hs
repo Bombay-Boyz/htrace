@@ -39,6 +39,7 @@ import Trace.Export.Otlp (otlpExporter)
 import Trace.Attributes
 import Trace.Core
 import Trace.Export.Types
+
 -- ---------------------------------------------------------------------------
 -- Tracer
 -- ---------------------------------------------------------------------------
@@ -105,6 +106,8 @@ setSpanStatus :: Span -> SpanStatus -> IO (Either SpanError ())
 setSpanStatus sp s = modifySpan sp $ \si -> si { siStatus = s }
 
 -- | Set the span status to 'StatusError' with the given message.
+-- Falls back to @\<unspecified error\>@ if the message is blank.
+setStatusError :: Span -> Text -> IO (Either SpanError ())
 setStatusError sp t =
   setSpanStatus sp (StatusError msg)
   where
@@ -232,7 +235,6 @@ getCurrentSpanContext = asks tcCurrentSpanContext
 flush :: Tracer -> IO (Either ExportError ())
 flush = exporterFlush . tracerExporter
 
-
 -- ---------------------------------------------------------------------------
 -- withTracing
 -- ---------------------------------------------------------------------------
@@ -280,6 +282,7 @@ withTracing cfg action = do
 -- | Convert a 'SamplerConfig' to a 'Sampler'.
 samplerFromConfig :: SamplerConfig -> Sampler
 samplerFromConfig = \case
-  AlwaysSample              -> alwaysOnSampler
-  NeverSample               -> alwaysOffSampler
-  TraceIdRatio sr -> traceIdRatioSampler (unSampleRate sr)
+  AlwaysSample        -> alwaysOnSampler
+  NeverSample         -> alwaysOffSampler
+  TraceIdRatio sr     -> traceIdRatioSampler (unSampleRate sr)
+  ParentBased rootCfg -> parentBasedSampler (samplerFromConfig rootCfg)

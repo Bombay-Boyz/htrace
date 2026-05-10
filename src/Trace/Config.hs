@@ -80,9 +80,6 @@ validationToEither :: Validation e a -> Either e a
 validationToEither (Failure e) = Left e
 validationToEither (Success a) = Right a
 
-liftFailure :: e -> Validation e a
-liftFailure = Failure
-
 traverseValidation
   :: Semigroup e
   => (a -> Validation e b)
@@ -158,6 +155,7 @@ data SamplerConfig
   = AlwaysSample
   | NeverSample
   | TraceIdRatio !SampleRate
+  | ParentBased  !SamplerConfig
   deriving stock (Show, Eq)
 
 -- ---------------------------------------------------------------------------
@@ -326,11 +324,23 @@ loadSamplerConfig = do
         Just d  -> case mkSampleRate d of
           Left e   -> pure $ Failure $ NE.singleton e
           Right sr -> pure $ Success (TraceIdRatio sr)
+    Just "parentbased_always_on"  ->
+      pure (Success (ParentBased AlwaysSample))
+    Just "parentbased_always_off" ->
+      pure (Success (ParentBased NeverSample))
+    Just "parentbased_traceidratio" -> do
+      arg <- lookupEnv "OTEL_TRACES_SAMPLER_ARG"
+      case arg >>= readPositiveDouble of
+        Nothing -> pure $ Failure $ NE.singleton $
+          MissingRequiredVar (EnvVarName "OTEL_TRACES_SAMPLER_ARG")
+        Just d  -> case mkSampleRate d of
+          Left e   -> pure $ Failure $ NE.singleton e
+          Right sr -> pure $ Success (ParentBased (TraceIdRatio sr))
     Just other -> pure $ Failure $ NE.singleton $
       InvalidVarValue
         (EnvVarName "OTEL_TRACES_SAMPLER")
         (Text.pack other)
-        "expected 'always_on', 'always_off', or 'traceidratio'"
+        "expected 'always_on', 'always_off', 'traceidratio', or 'parentbased_*'"
   where
     readPositiveDouble str = case TR.double (Text.pack str) of
       Right (d, rest) | Text.null rest -> Just d
