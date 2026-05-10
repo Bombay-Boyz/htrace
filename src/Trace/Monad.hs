@@ -105,16 +105,12 @@ setSpanStatus :: Span -> SpanStatus -> IO (Either SpanError ())
 setSpanStatus sp s = modifySpan sp $ \si -> si { siStatus = s }
 
 -- | Set the span status to 'StatusError' with the given message.
--- Falls back to @\<unspecified error\>@ if the message is blank.
-setStatusError :: Span -> Text -> IO (Either SpanError ())
 setStatusError sp t =
-  setSpanStatus sp $ StatusError $
-    case mkErrorMessage t of
+  setSpanStatus sp (StatusError msg)
+  where
+    msg = case mkErrorMessage t of
       Just m  -> m
-      Nothing ->
-         case mkErrorMessage (Text.pack "<unspecified error>") of
-             Just m  -> m
-             Nothing -> error "mkErrorMessage failed"
+      Nothing -> unspecifiedErrorMessage
 
 -- | Append a timestamped event to a live span.
 addEvent :: Span -> Text -> SpanAttrs -> IO (Either SpanError ())

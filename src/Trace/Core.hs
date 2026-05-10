@@ -25,6 +25,7 @@ module Trace.Core
   , ErrorMessage
   , unErrorMessage
   , mkErrorMessage
+  , unspecifiedErrorMessage
     -- * Span name
   , SpanName (..)
   , mkSpanName
@@ -162,6 +163,11 @@ mkErrorMessage :: Text -> Maybe ErrorMessage
 mkErrorMessage t
   | Text.null (Text.strip t) = Nothing
   | otherwise                = Just (ErrorMessage t)
+
+-- | A pre-built 'ErrorMessage' used as a fallback when no message is provided.
+-- Equivalent to @fromJust (mkErrorMessage "<unspecified error>")@.
+unspecifiedErrorMessage :: ErrorMessage
+unspecifiedErrorMessage = ErrorMessage (Text.pack "<unspecified error>")
 
 data SpanStatus
   = StatusUnset
