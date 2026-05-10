@@ -36,6 +36,9 @@ data BatchConfig = BatchConfig
   , onDroppedSpans :: !(Int -> IO ())
     -- ^ Callback invoked (on a background thread) when spans are dropped
     --   because the queue is full.
+  , batchLogger    :: !InternalLogger
+    -- ^ Receives warnings for export failures and timeouts.
+    --   Use 'silentLogger' to suppress (e.g. in tests that expect failures).
   }
 
 -- | Warn to stderr when spans are dropped.
@@ -52,6 +55,7 @@ defaultBatchConfig = BatchConfig
   , exportInterval = 5
   , exportTimeout  = 30
   , onDroppedSpans = defaultOnDroppedSpans stderrLogger
+  , batchLogger    = stderrLogger
   }
 
 -- ---------------------------------------------------------------------------
@@ -119,8 +123,6 @@ batchExporter cfg inner =
         pure nDropped
       pure (ExportSuccess (n - dropped))
 
-    void m = m >> pure ()
-
     -- -----------------------------------------------------------------------
     -- Notifier thread: drains dropChan and calls onDroppedSpans
     -- -----------------------------------------------------------------------
@@ -138,6 +140,17 @@ batchExporter cfg inner =
           case mn of
             Just n  -> onDroppedSpans cfg n >> loop
             Nothing -> atomically (putTMVar done ())
+
+    -- -----------------------------------------------------------------------
+    -- Safe log: logger failures must never crash the worker
+    -- -----------------------------------------------------------------------
+
+    safeLog :: (InternalLogger -> Text.Text -> IO ()) -> Text.Text -> IO ()
+    safeLog f msg = do
+      result <- try (f (batchLogger cfg) msg) :: IO (Either SomeException ())
+      case result of
+        Right () -> pure ()
+        Left  _  -> pure ()
 
     -- -----------------------------------------------------------------------
     -- Worker thread: periodically drains queue and exports
@@ -166,11 +179,31 @@ batchExporter cfg inner =
           batch <- atomically (drainBatch queue (maxExportBatch cfg))
           case NE.nonEmpty batch of
             Nothing -> pure ()
-            Just ne ->
-              -- Abandon the export if it exceeds exportTimeout.
-              void $ race
+            Just ne -> do
+              raceResult <- race
                 (threadDelay timeoutMicros)
                 (try (exporterExport inner ne) :: IO (Either SomeException ExportResult))
+              case raceResult of
+                Left () ->
+                  safeLog logWarn
+                    (  "htrace: export timed out after "
+                    <> Text.pack (show (exportTimeout cfg))
+                    <> "s; "
+                    <> Text.pack (show (NE.length ne))
+                    <> " spans abandoned"
+                    )
+                Right (Left ex) ->
+                  safeLog logError
+                    (  "htrace: exporter threw exception: "
+                    <> Text.pack (show ex)
+                    )
+                Right (Right (ExportFailure err)) ->
+                  safeLog logWarn
+                    (  "htrace: export returned failure: "
+                    <> Text.pack (show err)
+                    )
+                Right (Right (ExportSuccess _)) ->
+                  pure ()
 
           -- Exit only when shutdown is set AND the queue is empty.
           shouldExit <- atomically $ do
@@ -202,10 +235,10 @@ batchExporter cfg inner =
     -- Shutdown: signal threads and wait for clean exit
     -- -----------------------------------------------------------------------
 
-    doShutdown queue shutdownVar workerDone notifierDone = do
+    doShutdown _queue shutdownVar workerDone notifierDone = do
       atomically (writeTVar shutdownVar True)
-      atomically (takeTMVar workerDone)
-      atomically (takeTMVar notifierDone)
+      _ <- atomically (takeTMVar workerDone)
+      _ <- atomically (takeTMVar notifierDone)
       exporterShutdown inner
 
     -- -----------------------------------------------------------------------

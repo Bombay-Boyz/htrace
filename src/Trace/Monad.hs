@@ -258,6 +258,7 @@ withTracing cfg action = do
       let batchCfg = defaultBatchConfig
             { onDroppedSpans =
                 defaultOnDroppedSpans (configLogger cfg)
+            , batchLogger    = configLogger cfg
             }
       batchedR <- batchExporter batchCfg inner
       case batchedR of

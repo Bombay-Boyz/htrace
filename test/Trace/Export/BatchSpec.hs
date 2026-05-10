@@ -1,8 +1,11 @@
 module Trace.Export.BatchSpec (spec) where
 
 import Control.Concurrent (threadDelay)
+import Control.Exception (throwIO)
 import Data.IORef (newIORef, readIORef, modifyIORef')
 import Data.List.NonEmpty qualified as NE
+import Data.Text (Text)
+import Data.Text qualified as Text
 import Test.Hspec
 
 import Trace.Export.Batch
@@ -12,10 +15,12 @@ import Trace.Generators
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
+
 -- | Show only the Left side of an Either; used when Right has no Show instance.
 showLeft :: Either BatchConfigError a -> String
 showLeft (Left e)  = show e
 showLeft (Right _) = "<Right>"
+
 -- | A batch config with a very long interval so the worker never wakes
 -- spontaneously during tests — exports happen only via shutdown or flush.
 quietConfig :: BatchConfig
@@ -25,7 +30,23 @@ quietConfig = defaultBatchConfig
   , exportInterval = 3600
   , exportTimeout  = 10
   , onDroppedSpans = \_ -> pure ()
+  , batchLogger    = silentLogger
   }
+
+-- | Capture log messages during a test without touching stderr.
+capturingLogger :: IO (InternalLogger, IO [Text], IO [Text])
+capturingLogger = do
+  warnsRef  <- newIORef ([] :: [Text])
+  errorsRef <- newIORef ([] :: [Text])
+  let logger = InternalLogger
+        { logWarn  = \t -> modifyIORef' warnsRef  (t :)
+        , logError = \t -> modifyIORef' errorsRef (t :)
+        }
+  pure
+    ( logger
+    , fmap reverse (readIORef warnsRef)
+    , fmap reverse (readIORef errorsRef)
+    )
 
 -- ---------------------------------------------------------------------------
 -- Spec
@@ -175,3 +196,102 @@ spec = do
       exporterShutdown batched
       spans <- readAll
       length spans `shouldBe` 200
+
+  -- -------------------------------------------------------------------------
+  -- Phase R5: worker logging
+  -- -------------------------------------------------------------------------
+
+  describe "batchLogger" $ do
+    it "logs a warning on export timeout" $ do
+      (logger, readWarns, _) <- capturingLogger
+      let slowExporter = noopExporter
+            { exporterExport = \_ -> threadDelay 5_000_000
+                                       >> pure (ExportSuccess 1)
+            }
+      Right batched <- batchExporter
+        quietConfig
+          { exportInterval = 0.01
+          , exportTimeout  = 0.05
+          , batchLogger    = logger
+          }
+        slowExporter
+      _ <- exporterExport batched (sampleSpan 0 NE.:| [])
+      threadDelay 500_000
+      exporterShutdown batched
+      warns <- readWarns
+      any (Text.isInfixOf "timed out") warns `shouldBe` True
+
+    it "logs an error when exporter throws" $ do
+      (logger, _, readErrors) <- capturingLogger
+      let crashExporter = noopExporter
+            { exporterExport = \_ -> throwIO (userError "boom")
+            }
+      Right batched <- batchExporter
+        quietConfig
+          { exportInterval = 0.01
+          , exportTimeout  = 5
+          , batchLogger    = logger
+          }
+        crashExporter
+      _ <- exporterExport batched (sampleSpan 0 NE.:| [])
+      threadDelay 300_000
+      exporterShutdown batched
+      errs <- readErrors
+      any (Text.isInfixOf "threw exception") errs `shouldBe` True
+
+    it "logs a warning on ExportFailure" $ do
+      (logger, readWarns, _) <- capturingLogger
+      let failExporter = noopExporter
+            { exporterExport = \_ ->
+                pure (ExportFailure (EndpointUnreachable "test"))
+            }
+      Right batched <- batchExporter
+        quietConfig
+          { exportInterval = 0.01
+          , exportTimeout  = 5
+          , batchLogger    = logger
+          }
+        failExporter
+      _ <- exporterExport batched (sampleSpan 0 NE.:| [])
+      threadDelay 300_000
+      exporterShutdown batched
+      warns <- readWarns
+      any (Text.isInfixOf "export returned failure") warns `shouldBe` True
+
+    it "ExportSuccess produces no log output" $ do
+      (logger, readWarns, readErrors) <- capturingLogger
+      Right batched <- batchExporter
+        quietConfig
+          { exportInterval = 0.01
+          , batchLogger    = logger
+          }
+        noopExporter
+      _ <- exporterExport batched (sampleSpan 0 NE.:| [])
+      threadDelay 300_000
+      exporterShutdown batched
+      warns  <- readWarns
+      errors <- readErrors
+      warns  `shouldBe` []
+      errors `shouldBe` []
+
+    it "crashing logger does not crash the worker" $ do
+      let crashLogger = InternalLogger
+            { logWarn  = \_ -> throwIO (userError "logger crash")
+            , logError = \_ -> throwIO (userError "logger crash")
+            }
+          failExporter = noopExporter
+            { exporterExport = \_ ->
+                pure (ExportFailure (EndpointUnreachable "test"))
+            }
+      Right batched <- batchExporter
+        quietConfig
+          { exportInterval = 0.01
+          , exportTimeout  = 5
+          , batchLogger    = crashLogger
+          }
+        failExporter
+      _ <- exporterExport batched (sampleSpan 0 NE.:| [])
+      threadDelay 300_000
+      exporterShutdown batched
+      -- If we reach here the worker did not crash
+      pure ()
