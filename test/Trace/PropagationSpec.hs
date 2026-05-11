@@ -3,10 +3,8 @@
 module Trace.PropagationSpec (spec) where
 
 import Control.Monad (forM_)
-import Data.ByteString qualified as BS
 import Data.CaseInsensitive qualified as CI
 import Data.Text qualified as Text
-import Data.Text.Encoding qualified as TE
 import Hedgehog (forAll, (===))
 import Hedgehog qualified as H
 import Hedgehog.Gen qualified as Gen
@@ -38,25 +36,55 @@ spec = do
       parseTraceparent "ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
         `shouldBe` PropagationInvalid (InvalidVersion "ff")
 
-    it "rejects future version 01 (v0.1 limitation)" $
-      parseTraceparent "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
-        `shouldBe` PropagationInvalid (InvalidVersion "01")
+    it "rejects forbidden version FF (case-normalised)" $
+      parseTraceparent "FF-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        `shouldBe` PropagationInvalid (InvalidVersion "ff")
+
+    it "accepts future version 01 (forward compatibility)" $
+      case parseTraceparent "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" of
+        PropagationSuccess _ -> pure ()
+        other -> expectationFailure ("expected PropagationSuccess, got: " <> show other)
+
+    it "accepts future version 0f" $
+      case parseTraceparent "0f-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" of
+        PropagationSuccess _ -> pure ()
+        other -> expectationFailure ("expected PropagationSuccess, got: " <> show other)
+
+    it "accepts future version 0F (uppercase hex)" $
+      case parseTraceparent "0F-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" of
+        PropagationSuccess _ -> pure ()
+        other -> expectationFailure ("expected PropagationSuccess, got: " <> show other)
+
+    it "ignores extra fields for future versions" $
+      case parseTraceparent "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra-data" of
+        PropagationSuccess _ -> pure ()
+        other -> expectationFailure ("expected PropagationSuccess, got: " <> show other)
+
+    it "ignores extra fields for version 00 as well" $
+      case parseTraceparent "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-ignored" of
+        PropagationSuccess _ -> pure ()
+        other -> expectationFailure ("expected PropagationSuccess, got: " <> show other)
 
     it "rejects malformed inputs" $ do
       let cases =
-            [ "00-4bf92f3577b34da6a3ce929d0e0e47-00f067aa0ba902b7-01"
-            , "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902-01"
-            , "00-00000000000000000000000000000000-00f067aa0ba902b7-01"
-            , "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01"
-            , "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-zz"
-            , "00-4bf92f3577b34da6a3ce929d0e0e4736"
-            , ""
+            [ "00-4bf92f3577b34da6a3ce929d0e0e47-00f067aa0ba902b7-01"   -- short trace-id
+            , "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902-01"   -- short span-id
+            , "00-00000000000000000000000000000000-00f067aa0ba902b7-01"  -- all-zero trace-id
+            , "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01"  -- all-zero span-id
+            , "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-zz"  -- bad flags
+            , "00-4bf92f3577b34da6a3ce929d0e0e4736"                      -- only 2 fields
+            , ""                                                          -- empty
             ]
-      mapM_
+      forM_
+        cases
         (\t -> case parseTraceparent t of
             PropagationInvalid _ -> pure ()
             other -> expectationFailure ("unexpected: " <> show other))
-        cases
+
+    it "rejects fewer than four fields even for future version" $
+      case parseTraceparent "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7" of
+        PropagationInvalid (MalformedHeader _) -> pure ()
+        other -> expectationFailure ("unexpected: " <> show other)
 
   describe "emitTraceparent" $ do
     it "emits valid structure" $ do
@@ -64,9 +92,21 @@ spec = do
       Text.isPrefixOf "00-" t `shouldBe` True
       length (Text.splitOn "-" t) `shouldBe` 4
 
+    it "always emits version 00" $ do
+      let t = emitTraceparent (fsContext sampleFinishedSpan)
+      case Text.splitOn "-" t of
+        (v:_) -> v `shouldBe` "00"
+        []    -> expectationFailure "empty result"
+
   describe "extractContext" $ do
     it "returns absent when missing" $
       extractContext [] `shouldBe` PropagationAbsent
+
+    it "returns invalid for non-utf8 header value" $ do
+      let badHeader = (CI.mk "traceparent", "\xff\xfe")
+      case extractContext [badHeader] of
+        PropagationInvalid (MalformedHeader _) -> pure ()
+        other -> expectationFailure ("unexpected: " <> show other)
 
   describe "injectHeaders" $ do
     it "round-trips context" $ do
@@ -77,6 +117,14 @@ spec = do
           scTraceId ctx' `shouldBe` scTraceId ctx
           scSpanId  ctx' `shouldBe` scSpanId ctx
         other -> expectationFailure ("unexpected: " <> show other)
+
+    it "replaces existing traceparent" $ do
+      let ctx1 = fsContext sampleFinishedSpan
+          ctx2 = fsContext (sampleSpan 99)
+          hs1  = injectHeaders ctx1 []
+          hs2  = injectHeaders ctx2 hs1
+          count = length (filter ((== CI.mk "traceparent") . fst) hs2)
+      count `shouldBe` 1
 
   describe "properties" $ do
 
@@ -93,16 +141,17 @@ spec = do
       hedgehog prop_inject_single_traceparent
 
 -- ---------------------------------------------------------------------------
--- Properties (PropertyT ONLY)
+-- Properties
 -- ---------------------------------------------------------------------------
 
 prop_traceparent_round_trip :: H.PropertyT IO ()
 prop_traceparent_round_trip = do
   ctx <- forAll genSpanContextNoParent
+  -- emitTraceparent always emits version "00"; must still round-trip.
   case parseTraceparent (emitTraceparent ctx) of
     PropagationSuccess ctx' -> do
-      scTraceId ctx' === scTraceId ctx
-      scSpanId ctx' === scSpanId ctx
+      scTraceId ctx'    === scTraceId ctx
+      scSpanId ctx'     === scSpanId ctx
       scTraceFlags ctx' === scTraceFlags ctx
     other -> H.footnote (show other) >> H.failure
 

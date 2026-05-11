@@ -50,32 +50,40 @@ data PropagationError
 -- ---------------------------------------------------------------------------
 
 -- | Parse a @traceparent@ header value.
--- Accepts version @00@ only; version @ff@ is always rejected per the W3C spec.
--- Future versions are rejected with 'InvalidVersion' — this is a documented
--- v0.1 limitation.
+--
+-- Accepts version @00@ and any future two-hex-digit version other than @ff@.
+-- When a future version is encountered the first four dash-separated fields
+-- are extracted and any additional fields are ignored, per W3C Trace Context
+-- specification §4.3 (forward compatibility).
+--
+-- Version @ff@ is permanently reserved by the W3C and is always rejected.
+-- Always emits version @00@ via 'emitTraceparent'.
 parseTraceparent :: Text -> PropagationResult
 parseTraceparent t =
   case Text.splitOn "-" t of
-    [v, tid, sid, flgs] ->
+    (v : tid : sid : flgs : _) ->
       if not (validVersion v)
-        then PropagationInvalid (InvalidVersion v)
+        then PropagationInvalid (InvalidVersion (Text.toLower v))
         else case decodeHex 16 tid of
-          Left _     -> PropagationInvalid (InvalidTraceId tid)
+          Left _      -> PropagationInvalid (InvalidTraceId tid)
           Right tidBs -> case traceIdFromBytes tidBs of
-            Left _       -> PropagationInvalid (InvalidTraceId tid)
+            Left _        -> PropagationInvalid (InvalidTraceId tid)
             Right traceId -> case decodeHex 8 sid of
-              Left _     -> PropagationInvalid (InvalidSpanId sid)
+              Left _      -> PropagationInvalid (InvalidSpanId sid)
               Right sidBs -> case spanIdFromBytes sidBs of
-                Left _     -> PropagationInvalid (InvalidSpanId sid)
+                Left _      -> PropagationInvalid (InvalidSpanId sid)
                 Right spanId -> case parseFlags flgs of
                   Nothing -> PropagationInvalid (InvalidFlags flgs)
                   Just f  -> PropagationSuccess
                                (SpanContext traceId spanId Nothing f)
     _ -> PropagationInvalid (MalformedHeader t)
   where
-    -- v0.1 only accepts version "00". All other versions including "ff"
-    -- (W3C reserved) are rejected. Future version support is a v0.2 item.
-    validVersion v = v == "00"
+    -- Accept any two lowercase-hex-digit version except the W3C-reserved "ff".
+    -- Normalise to lowercase before comparison so "0F" and "0f" are identical.
+    validVersion v =
+      Text.length v == 2
+        && Text.all isHexDigit v
+        && Text.toLower v /= "ff"
 
     parseFlags f
       | Text.length f == 2 && Text.all isHexDigit f =
