@@ -181,11 +181,11 @@ batchExporter cfg inner =
           case NE.nonEmpty batch of
             Nothing -> pure ()
             Just ne -> do
-              raceResult <- race
-                (threadDelay timeoutMicros)
-                (try (exporterExport inner ne) :: IO (Either SomeException ExportResult))
-              case raceResult of
-                Left () ->
+              mResult <- timeout timeoutMicros
+                           (try (exporterExport inner ne)
+                             :: IO (Either SomeException ExportResult))
+              case mResult of
+                Nothing ->
                   safeLog logWarn
                     (  "htrace: export timed out after "
                     <> Text.pack (show (exportTimeout cfg))
@@ -193,17 +193,17 @@ batchExporter cfg inner =
                     <> Text.pack (show (NE.length ne))
                     <> " spans abandoned"
                     )
-                Right (Left ex) ->
+                Just (Left ex) ->
                   safeLog logError
                     (  "htrace: exporter threw exception: "
                     <> Text.pack (show ex)
                     )
-                Right (Right (ExportFailure err)) ->
+                Just (Right (ExportFailure err)) ->
                   safeLog logWarn
                     (  "htrace: export returned failure: "
                     <> Text.pack (show err)
                     )
-                Right (Right (ExportSuccess _)) ->
+                Just (Right (ExportSuccess _)) ->
                   pure ()
 
           -- Exit only when shutdown is set AND the queue is empty.
@@ -224,13 +224,13 @@ batchExporter cfg inner =
       case NE.nonEmpty batch of
         Nothing -> pure (Right ())
         Just ne -> do
-          result <- race
-            (threadDelay (round (realToFrac (exportTimeout cfg) * 1_000_000 :: Double)))
-            (exporterExport inner ne)
-          case result of
-            Left  ()                -> pure (Left (ExportTimeout (exportTimeout cfg)))
-            Right (ExportSuccess _) -> pure (Right ())
-            Right (ExportFailure e) -> pure (Left e)
+          let flushTimeoutMicros =
+                round (realToFrac (exportTimeout cfg) * 1_000_000 :: Double)
+          mResult <- timeout flushTimeoutMicros (exporterExport inner ne)
+          case mResult of
+            Nothing                -> pure (Left (ExportTimeout (exportTimeout cfg)))
+            Just (ExportSuccess _) -> pure (Right ())
+            Just (ExportFailure e) -> pure (Left e)
 
     -- -----------------------------------------------------------------------
     -- Shutdown: signal threads and wait for clean exit
