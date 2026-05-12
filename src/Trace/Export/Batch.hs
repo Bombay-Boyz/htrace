@@ -10,6 +10,7 @@ module Trace.Export.Batch
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.STM
 import Control.Monad (when)
+import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
 import Data.Text qualified as Text
 import Data.Time (NominalDiffTime)
@@ -17,9 +18,8 @@ import System.Timeout (timeout)
 import UnliftIO.Async (race)
 import Control.Exception (SomeException)
 import UnliftIO.Exception (try)
-import Trace.Core (FinishedSpan)
 import Trace.Export.Types
-
+import Trace.Core (FinishedSpan)
 -- ---------------------------------------------------------------------------
 -- Configuration
 -- ---------------------------------------------------------------------------
@@ -83,6 +83,10 @@ validateBatchConfig c
 
 -- | Wrap any 'SpanExporter' with a bounded async queue and background
 -- flush worker. Returns 'Left' if the config is invalid.
+--
+-- After 'exporterShutdown' is called, subsequent calls to 'exporterExport'
+-- and 'exporterFlush' return 'ExporterShutDown' immediately without
+-- touching the inner exporter.
 batchExporter
   :: BatchConfig
   -> SpanExporter
@@ -94,17 +98,45 @@ batchExporter cfg inner =
       queue        <- newTBQueueIO (fromIntegral (maxQueueSize cfg))
       dropChan     <- newTBQueueIO 64
       shutdownVar  <- newTVarIO False
+      isShutDown   <- newTVarIO False
       workerDone   <- newEmptyTMVarIO
       notifierDone <- newEmptyTMVarIO
       _ <- forkIO (worker queue shutdownVar workerDone)
       _ <- forkIO (notifier dropChan shutdownVar notifierDone)
       pure $ Right $ SpanExporter
-        { exporterExport   = enqueue queue dropChan
-        , exporterFlush    = doFlush queue
+        { exporterExport   = guardShutDown isShutDown (enqueue queue dropChan)
+        , exporterFlush    = guardShutDownFlush isShutDown (doFlush queue)
         , exporterShutdown = doShutdown queue shutdownVar
-                               workerDone notifierDone
+                               workerDone notifierDone isShutDown
         }
   where
+    -- -----------------------------------------------------------------------
+    -- Post-shutdown guard
+    -- -----------------------------------------------------------------------
+
+    -- | Reject export calls after shutdown with an explicit error.
+    guardShutDown
+      :: TVar Bool
+      -> (NonEmpty FinishedSpan -> IO ExportResult)
+      -> NonEmpty FinishedSpan
+      -> IO ExportResult
+    guardShutDown isShutDownVar action ne = do
+      shut <- readTVarIO isShutDownVar
+      if shut
+        then pure (ExportFailure ExporterShutDown)
+        else action ne
+
+    -- | Reject flush calls after shutdown with an explicit error.
+    guardShutDownFlush
+      :: TVar Bool
+      -> IO (Either ExportError ())
+      -> IO (Either ExportError ())
+    guardShutDownFlush isShutDownVar action = do
+      shut <- readTVarIO isShutDownVar
+      if shut
+        then pure (Left ExporterShutDown)
+        else action
+
     -- -----------------------------------------------------------------------
     -- Enqueue
     -- -----------------------------------------------------------------------
@@ -236,7 +268,7 @@ batchExporter cfg inner =
     -- Shutdown: signal threads and wait for clean exit
     -- -----------------------------------------------------------------------
 
-    doShutdown _queue shutdownVar workerDone notifierDone = do
+    doShutdown _queue shutdownVar workerDone notifierDone isShutDownVar = do
       atomically (writeTVar shutdownVar True)
       -- Give the worker and notifier time to drain and exit cleanly.
       -- The deadline is exportTimeout + 1s: enough for the worker's
@@ -258,6 +290,9 @@ batchExporter cfg inner =
           safeLog logWarn
             "htrace: notifier did not exit within shutdown deadline."
         Just () -> pure ()
+      -- Mark as shut down before releasing inner exporter resources so
+      -- any concurrent export calls see the flag immediately.
+      atomically (writeTVar isShutDownVar True)
       -- Always shut down the inner exporter regardless of whether
       -- threads exited cleanly — resource release must not be skipped.
       exporterShutdown inner

@@ -65,6 +65,8 @@ data ExportError
     -- ^ The export did not complete within the allowed time.
   | SerializationFailed !Text
     -- ^ The span batch could not be serialized.
+  | ExporterShutDown
+    -- ^ The exporter has been shut down and no longer accepts spans.
   deriving stock (Show, Eq)
 
 -- ---------------------------------------------------------------------------

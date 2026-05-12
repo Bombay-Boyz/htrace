@@ -197,6 +197,18 @@ spec = do
       spans <- readAll
       length spans `shouldBe` 200
 
+    it "exporterExport returns ExporterShutDown after shutdown" $ do
+      Right batched <- batchExporter quietConfig noopExporter
+      exporterShutdown batched
+      result <- exporterExport batched (sampleSpan 0 NE.:| [])
+      result `shouldBe` ExportFailure ExporterShutDown
+
+    it "exporterFlush returns ExporterShutDown after shutdown" $ do
+      Right batched <- batchExporter quietConfig noopExporter
+      exporterShutdown batched
+      result <- exporterFlush batched
+      result `shouldBe` Left ExporterShutDown
+
   -- -------------------------------------------------------------------------
   -- Phase R5: worker logging
   -- -------------------------------------------------------------------------
