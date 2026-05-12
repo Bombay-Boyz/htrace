@@ -122,19 +122,29 @@ addEvent sp name evAttrs = do
   modifySpan sp $ \si ->
     si { siEvents = SpanEvent name now evAttrs : siEvents si }
 
--- | Record an exception as a span event and set the status to error.
+-- | Record an exception as a span event and set the status to error
+-- in a single atomic STM transaction.
 -- Follows the OpenTelemetry semantic conventions for exception events.
 recordException
   :: Exception e => Span -> e -> IO (Either SpanError ())
 recordException sp e = do
-  let evAttrs = attrs
+  -- Capture the timestamp outside STM — IO cannot run inside atomically.
+  now <- clockNow (spanClock sp)
+  let msg = case mkErrorMessage (Text.pack (displayException e)) of
+              Just m  -> m
+              Nothing -> unspecifiedErrorMessage
+      evAttrs = attrs
         [ ( AttrKey "exception.type"
           , AttrString (Text.pack (show (typeOf e))) )
         , ( AttrKey "exception.message"
           , AttrString (Text.pack (displayException e)) )
         ]
-  _ <- setStatusError sp (Text.pack (displayException e))
-  addEvent sp "exception" evAttrs
+      ev = SpanEvent "exception" now evAttrs
+  -- Apply both the status update and the event in one transaction.
+  modifySpan sp $ \si ->
+    si { siStatus = StatusError msg
+       , siEvents = ev : siEvents si
+       }
 
 -- ---------------------------------------------------------------------------
 -- Span lifecycle
