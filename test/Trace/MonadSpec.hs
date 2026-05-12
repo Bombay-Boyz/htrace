@@ -178,6 +178,30 @@ spec = do
         other         ->
           expectationFailure ("expected StatusError, got: " <> show other)
 
+    it "sets both status and event atomically — both present or neither" $ do
+      fs <- withCapturedSpan $ \_ sp ->
+        void $ recordException sp (userError "atomic-test")
+      -- Both must be present. If non-atomic, a race could produce one
+      -- without the other.
+      case fsStatus fs of
+        StatusError _ -> pure ()
+        other ->
+          expectationFailure ("expected StatusError, got: " <> show other)
+      case fsEvents fs of
+        [ev] -> eventName ev `shouldBe` "exception"
+        []   -> expectationFailure "expected exception event but got none"
+        evs  -> expectationFailure
+          ("expected exactly 1 event, got " <> show (length evs))
+
+    it "returns Left SpanAlreadyEnded when span has ended" $ do
+      (exporter, _) <- memoryExporter
+      let tracer = mkTestTracer exporter
+      spRef <- newIORef (error "uninitialised")
+      inSpan tracer "t" Internal mempty $ \sp -> writeIORef spRef sp
+      sp <- readIORef spRef
+      result <- recordException sp (userError "too late")
+      result `shouldBe` Left SpanAlreadyEnded      
+
   describe "inSpanM" $ do
     it "child span inherits trace ID from parent" $ do
       (exporter, readAll) <- memoryExporter

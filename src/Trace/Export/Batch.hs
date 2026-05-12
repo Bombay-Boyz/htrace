@@ -13,6 +13,7 @@ import Control.Monad (when)
 import Data.List.NonEmpty qualified as NE
 import Data.Text qualified as Text
 import Data.Time (NominalDiffTime)
+import System.Timeout (timeout)
 import UnliftIO.Async (race)
 import Control.Exception (SomeException)
 import UnliftIO.Exception (try)
@@ -237,8 +238,28 @@ batchExporter cfg inner =
 
     doShutdown _queue shutdownVar workerDone notifierDone = do
       atomically (writeTVar shutdownVar True)
-      _ <- atomically (takeTMVar workerDone)
-      _ <- atomically (takeTMVar notifierDone)
+      -- Give the worker and notifier time to drain and exit cleanly.
+      -- The deadline is exportTimeout + 1s: enough for the worker's
+      -- current in-flight export to complete or time out before us.
+      let deadlineMicros =
+            round (realToFrac (exportTimeout cfg + 1) * 1_000_000 :: Double)
+      workerExited <- timeout deadlineMicros
+                        (atomically (takeTMVar workerDone))
+      case workerExited of
+        Nothing ->
+          safeLog logWarn
+            "htrace: worker did not exit within shutdown deadline; \
+            \forcing shutdown. Some spans may not have been exported."
+        Just () -> pure ()
+      notifierExited <- timeout deadlineMicros
+                          (atomically (takeTMVar notifierDone))
+      case notifierExited of
+        Nothing ->
+          safeLog logWarn
+            "htrace: notifier did not exit within shutdown deadline."
+        Just () -> pure ()
+      -- Always shut down the inner exporter regardless of whether
+      -- threads exited cleanly — resource release must not be skipped.
       exporterShutdown inner
 
     -- -----------------------------------------------------------------------
