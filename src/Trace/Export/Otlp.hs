@@ -11,7 +11,7 @@ module Trace.Export.Otlp
     -- * OTLP encoding (exposed for testing)
   , encodeOtlp
   ) where
-
+import Data.ByteString (ByteString)
 import Data.Aeson (Value (..), encode, object, (.=))
 import Data.ByteString.Base16 qualified as Base16
 import Data.CaseInsensitive qualified as CI
@@ -41,7 +41,7 @@ import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types (statusCode)
 import Network.URI qualified as URI
 import UnliftIO.Exception (SomeException, try)
-import Data.ByteString (ByteString)
+import Data.ByteString.Base16 qualified as Base16
 import Trace.Attributes
 import Trace.Core
 import Trace.Export.Types
