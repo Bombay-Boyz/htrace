@@ -318,31 +318,43 @@ loadSamplerConfig = do
     Just "always_off" -> pure (Success NeverSample)
     Just "traceidratio" -> do
       arg <- lookupEnv "OTEL_TRACES_SAMPLER_ARG"
-      case arg >>= readPositiveDouble of
+      case arg of
         Nothing -> pure $ Failure $ NE.singleton $
           MissingRequiredVar (EnvVarName "OTEL_TRACES_SAMPLER_ARG")
-        Just d  -> case mkSampleRate d of
-          Left e   -> pure $ Failure $ NE.singleton e
-          Right sr -> pure $ Success (TraceIdRatio sr)
+        Just s  -> case parseDouble s of
+          Nothing -> pure $ Failure $ NE.singleton $
+            InvalidVarValue
+              (EnvVarName "OTEL_TRACES_SAMPLER_ARG")
+              (Text.pack s)
+              "expected a number in [0, 1]"
+          Just d  -> case mkSampleRate d of
+            Left e   -> pure $ Failure $ NE.singleton e
+            Right sr -> pure $ Success (TraceIdRatio sr)
     Just "parentbased_always_on"  ->
       pure (Success (ParentBased AlwaysSample))
     Just "parentbased_always_off" ->
       pure (Success (ParentBased NeverSample))
     Just "parentbased_traceidratio" -> do
       arg <- lookupEnv "OTEL_TRACES_SAMPLER_ARG"
-      case arg >>= readPositiveDouble of
+      case arg of
         Nothing -> pure $ Failure $ NE.singleton $
           MissingRequiredVar (EnvVarName "OTEL_TRACES_SAMPLER_ARG")
-        Just d  -> case mkSampleRate d of
-          Left e   -> pure $ Failure $ NE.singleton e
-          Right sr -> pure $ Success (ParentBased (TraceIdRatio sr))
+        Just s  -> case parseDouble s of
+          Nothing -> pure $ Failure $ NE.singleton $
+            InvalidVarValue
+              (EnvVarName "OTEL_TRACES_SAMPLER_ARG")
+              (Text.pack s)
+              "expected a number in [0, 1]"
+          Just d  -> case mkSampleRate d of
+            Left e   -> pure $ Failure $ NE.singleton e
+            Right sr -> pure $ Success (ParentBased (TraceIdRatio sr))
     Just other -> pure $ Failure $ NE.singleton $
       InvalidVarValue
         (EnvVarName "OTEL_TRACES_SAMPLER")
         (Text.pack other)
         "expected 'always_on', 'always_off', 'traceidratio', or 'parentbased_*'"
   where
-    readPositiveDouble str = case TR.double (Text.pack str) of
+    parseDouble str = case TR.double (Text.pack str) of
       Right (d, rest) | Text.null rest -> Just d
       _                                -> Nothing
 

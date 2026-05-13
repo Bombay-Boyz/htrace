@@ -290,6 +290,32 @@ spec = around_ withCleanEnv $ do
             Right _ ->
               expectationFailure "expected Left"
 
+      it "returns InvalidVarValue for unparseable traceidratio arg" $ do
+        withEnvVars
+          [ ("OTEL_TRACES_EXPORTER",    "none")
+          , ("OTEL_TRACES_SAMPLER",     "traceidratio")
+          , ("OTEL_TRACES_SAMPLER_ARG", "abc")
+          ] $ do
+          result <- fromEnv
+          case result of
+            Left errs ->
+              any isInvalidVarValue (NE.toList errs) `shouldBe` True
+            Right _ ->
+              expectationFailure "expected Left"
+
+      it "accepts traceidratio arg of 0 (valid per OTel spec)" $ do
+        withEnvVars
+          [ ("OTEL_TRACES_EXPORTER",    "none")
+          , ("OTEL_TRACES_SAMPLER",     "traceidratio")
+          , ("OTEL_TRACES_SAMPLER_ARG", "0")
+          ] $ do
+          result <- fromEnv
+          case result of
+            Right cfg -> case configSampler cfg of
+              TraceIdRatio sr -> unSampleRate sr `shouldBe` 0.0
+              other -> expectationFailure ("expected TraceIdRatio, got: " <> show other)
+            Left errs -> expectationFailure (show errs)
+
     describe "OTEL_SERVICE_NAME" $ do
       it "sets service.name in resource" $ do
         withEnvVars
