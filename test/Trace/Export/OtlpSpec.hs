@@ -14,6 +14,7 @@ import Network.Wai.Handler.Warp qualified as Warp
 import Test.Hspec
 
 import Trace.Attributes
+import Trace.Config (defaultResource, unResource)
 import Trace.Core
 import Trace.Export.Otlp
 import Trace.Export.Types
@@ -36,6 +37,10 @@ recordingApp ref req respond = do
 failingApp :: Application
 failingApp _req respond =
   respond (responseLBS status503 [] "Service Unavailable")
+
+-- | A fixed scope used in encoding tests.
+testScope :: InstrumentationScope
+testScope = InstrumentationScope "htrace-test" (Just "0.0.0")
 
 -- ---------------------------------------------------------------------------
 -- Spec
@@ -94,6 +99,8 @@ spec = do
               ("http://localhost:" <> Text.pack (show port))
         result <- otlpExporter
           (OtlpConfig ep [("x:bad", "value")] 5 NoCompression)
+          (unResource defaultResource)
+          testScope
         case result of
           Left (ExporterInvalidHeader k _) ->
             k `shouldBe` "x:bad"
@@ -109,6 +116,8 @@ spec = do
               ("http://localhost:" <> Text.pack (show port))
         result <- otlpExporter
           (OtlpConfig ep [("x\nbad", "value")] 5 NoCompression)
+          (unResource defaultResource)
+          testScope
         case result of
           Left (ExporterInvalidHeader _ _) -> pure ()
           Left other ->
@@ -134,40 +143,60 @@ spec = do
 
   describe "encodeOtlp" $ do
     it "produces valid JSON" $ do
-      let json = encode (encodeOtlp [sampleFinishedSpan])
+      let json = encode (encodeOtlp (unResource defaultResource) testScope [sampleFinishedSpan])
       case decode json :: Maybe Value of
         Just _  -> pure ()
         Nothing -> expectationFailure "produced invalid JSON"
 
     it "top-level key is resourceSpans" $ do
-      let json = encode (encodeOtlp [sampleFinishedSpan])
+      let json = encode (encodeOtlp (unResource defaultResource) testScope [sampleFinishedSpan])
       case decode json :: Maybe Value of
         Just (Object o) ->
           KM.member "resourceSpans" o `shouldBe` True
         other ->
           expectationFailure ("unexpected: " <> show other)
 
+    it "resource block contains service.name" $ do
+      let json = encode (encodeOtlp (unResource defaultResource) testScope [sampleFinishedSpan])
+      LBS8.unpack json `shouldContain` "service.name"
+
+    it "scope block contains scope name" $ do
+      let json = LBS8.unpack
+                   (encode (encodeOtlp (unResource defaultResource) testScope [sampleFinishedSpan]))
+      json `shouldContain` "htrace-test"
+
+    it "scope block contains scope version" $ do
+      let json = LBS8.unpack
+                   (encode (encodeOtlp (unResource defaultResource) testScope [sampleFinishedSpan]))
+      json `shouldContain` "0.0.0"
+
+    it "scope without version omits version field" $ do
+      let noVersionScope = InstrumentationScope "no-ver" Nothing
+          json = LBS8.unpack
+                   (encode (encodeOtlp (unResource defaultResource) noVersionScope [sampleFinishedSpan]))
+      json `shouldNotContain` "\"version\""
+
     it "encodes all six AttrValue constructors without error" $ do
       let fs   = sampleFinishedSpan { fsAttributes = allAttrTypes }
-          json = encode (encodeOtlp [fs])
+          json = encode (encodeOtlp (unResource defaultResource) testScope [fs])
       case decode json :: Maybe Value of
         Just _  -> pure ()
         Nothing -> expectationFailure "produced invalid JSON"
 
     it "empty attributes encode as array not null" $ do
       let fs   = sampleFinishedSpan { fsAttributes = mempty }
-          json = LBS8.unpack (encode (encodeOtlp [fs]))
+          json = LBS8.unpack (encode (encodeOtlp (unResource defaultResource) testScope [fs]))
       ("\"attributes\":[]" `isInfixOf` json) `shouldBe` True
 
     it "empty events encode as array not null" $ do
       let fs   = sampleFinishedSpan { fsEvents = [] }
-          json = LBS8.unpack (encode (encodeOtlp [fs]))
+          json = LBS8.unpack (encode (encodeOtlp (unResource defaultResource) testScope [fs]))
       ("\"events\":[]" `isInfixOf` json) `shouldBe` True
 
     it "zero-duration span encodes identical start and end nanos" $ do
       let fs   = sampleFinishedSpan
                    { fsEndTime = fsStartTime sampleFinishedSpan }
-          json = encode (encodeOtlp [fs])
+          json = encode (encodeOtlp (unResource defaultResource) testScope [fs])
       case decode json :: Maybe Value of
         Just _  -> pure ()
         Nothing -> expectationFailure "produced invalid JSON"
@@ -180,6 +209,8 @@ spec = do
               ("http://localhost:" <> Text.pack (show port))
         Right exporter <- otlpExporter
           (OtlpConfig ep [] 5 NoCompression)
+          (unResource defaultResource)
+          testScope
         _ <- exporterExport exporter (sampleFinishedSpan NE.:| [])
         mBody <- readIORef bodyRef
         case mBody of
@@ -193,7 +224,10 @@ spec = do
 
     it "returns EndpointUnreachable when nothing is listening" $ do
       let Right ep = mkEndpoint "http://localhost:1"
-      Right exporter <- otlpExporter (OtlpConfig ep [] 1 NoCompression)
+      Right exporter <- otlpExporter
+        (OtlpConfig ep [] 1 NoCompression)
+        (unResource defaultResource)
+        testScope
       result <- exporterExport exporter (sampleFinishedSpan NE.:| [])
       case result of
         ExportFailure (EndpointUnreachable _) -> pure ()
@@ -205,6 +239,8 @@ spec = do
               ("http://localhost:" <> Text.pack (show port))
         Right exporter <- otlpExporter
           (OtlpConfig ep [] 5 NoCompression)
+          (unResource defaultResource)
+          testScope
         result <- exporterExport exporter (sampleFinishedSpan NE.:| [])
         case result of
           ExportFailure (MalformedResponse hs _) ->

@@ -8,7 +8,7 @@ import Control.Monad.Reader (runReaderT)
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
 import Data.Text qualified as Text
 import Test.Hspec
-
+import Trace.Config (defaultResource)
 import Trace.Attributes
 import Trace.Core
 import Trace.Export.Types
@@ -22,6 +22,7 @@ import Trace.Generators
 mkTestTracer :: SpanExporter -> Tracer
 mkTestTracer exporter = Tracer
   { tracerScope    = InstrumentationScope "test" Nothing
+  , tracerResource = defaultResource
   , tracerSampler  = alwaysOnSampler
   , tracerExporter = exporter
   , tracerClock    = systemClock

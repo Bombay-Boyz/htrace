@@ -9,7 +9,6 @@ import Trace.Config
 import Trace.Core
 import Trace.Export.Types
 import Trace.Monad
-import Trace.Generators
 
 -- ---------------------------------------------------------------------------
 -- Spec
@@ -41,6 +40,7 @@ spec = do
       (mem, readAll) <- memoryExporter
       let tracer = Tracer
             { tracerScope    = InstrumentationScope "test" Nothing
+            , tracerResource = defaultResource
             , tracerSampler  = alwaysOnSampler
             , tracerExporter = mem
             , tracerClock    = systemClock
@@ -62,6 +62,7 @@ spec = do
       (mem, readAll) <- memoryExporter
       let tracer = Tracer
             { tracerScope    = InstrumentationScope "test" Nothing
+            , tracerResource = defaultResource
             , tracerSampler  = alwaysOnSampler
             , tracerExporter = mem
             , tracerClock    = systemClock
@@ -83,6 +84,7 @@ spec = do
       (mem, readAll) <- memoryExporter
       let tracer = Tracer
             { tracerScope    = InstrumentationScope "test" Nothing
+            , tracerResource = defaultResource
             , tracerSampler  = samplerFromConfig AlwaysSample
             , tracerExporter = mem
             , tracerClock    = systemClock
@@ -96,6 +98,7 @@ spec = do
       (mem, readAll) <- memoryExporter
       let tracer = Tracer
             { tracerScope    = InstrumentationScope "test" Nothing
+            , tracerResource = defaultResource
             , tracerSampler  = samplerFromConfig NeverSample
             , tracerExporter = mem
             , tracerClock    = systemClock
@@ -116,6 +119,7 @@ spec = do
       (mem, readAll) <- memoryExporter
       let tracer = Tracer
             { tracerScope    = InstrumentationScope "test" Nothing
+            , tracerResource = defaultResource
             , tracerSampler  = alwaysOnSampler
             , tracerExporter = mem
             , tracerClock    = systemClock

@@ -47,6 +47,7 @@ import Trace.Export.Types
 -- | A configured tracing handle. Pass this to 'inSpan' and 'inSpanM'.
 data Tracer = Tracer
   { tracerScope    :: !InstrumentationScope
+  , tracerResource :: !Resource
   , tracerSampler  :: !Sampler
   , tracerExporter :: !SpanExporter
   , tracerClock    :: !Clock
@@ -259,15 +260,15 @@ withTracing
   -> (Tracer -> IO a)
   -> IO (Either ExporterInitError a)
 withTracing cfg action = do
+  let scope = InstrumentationScope "htrace" (Just "0.1.0.0")
   innerR <- case configExporter cfg of
     NoopExporter   -> pure (Right noopExporter)
-    OtlpExporter c -> otlpExporter c
+    OtlpExporter c -> otlpExporter c (unResource (configResource cfg)) scope
   case innerR of
     Left e     -> pure (Left e)
     Right inner -> do
       let batchCfg = defaultBatchConfig
-            { onDroppedSpans =
-                defaultOnDroppedSpans (configLogger cfg)
+            { onDroppedSpans = defaultOnDroppedSpans (configLogger cfg)
             , batchLogger    = configLogger cfg
             }
       batchedR <- batchExporter batchCfg inner
@@ -277,8 +278,8 @@ withTracing cfg action = do
             *> pure (Left (ExporterBatchInit be))
         Right batched -> do
           let tracer = Tracer
-                { tracerScope    = InstrumentationScope
-                                     "htrace" (Just "0.1.0.0")
+                { tracerScope    = scope
+                , tracerResource = configResource cfg
                 , tracerSampler  = samplerFromConfig (configSampler cfg)
                 , tracerExporter = batched
                 , tracerClock    = systemClock

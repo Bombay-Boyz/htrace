@@ -9,6 +9,7 @@ module Trace
     -- * Tracer
   , Tracer
   , tracerScope
+  , tracerResource
 
     -- * Span creation
   , inSpan
@@ -73,6 +74,8 @@ module Trace
   , Resource
   , mkResource
   , unResource
+  , defaultResource
+  , InstrumentationScope (..)
   , SamplerConfig (..)
   , SampleRate
   , mkSampleRate

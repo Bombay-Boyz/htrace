@@ -13,7 +13,7 @@ module Trace.Export.Otlp
   ) where
 
 import Data.Aeson (Value (..), encode, object, (.=))
-import Data.ByteString.Lazy qualified as LBS
+import Data.ByteString.Base16 qualified as Base16
 import Data.CaseInsensitive qualified as CI
 import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
@@ -111,10 +111,16 @@ redactHeaders = map redact
 -- Constructor
 -- ---------------------------------------------------------------------------
 
--- | Build an OTLP/HTTP JSON 'SpanExporter' from the given config.
+-- | Build an OTLP/HTTP JSON 'SpanExporter' from the given config,
+-- stamping every exported batch with the given 'Resource' and
+-- 'InstrumentationScope'.
 -- Returns 'Left' if any header name is invalid.
-otlpExporter :: OtlpConfig -> IO (Either ExporterInitError SpanExporter)
-otlpExporter cfg = do
+otlpExporter
+  :: OtlpConfig
+  -> SpanAttrs
+  -> InstrumentationScope
+  -> IO (Either ExporterInitError SpanExporter)
+otlpExporter cfg resourceAttrs scope = do
   case validateHeaders (otlpHeaders cfg) of
     Left e   -> pure (Left e)
     Right hs -> do
@@ -129,7 +135,7 @@ otlpExporter cfg = do
                   (round (otlpTimeout cfg * 1_000_000))
             }
       pure $ Right $ SpanExporter
-        { exporterExport   = doExport mgr req
+        { exporterExport   = doExport mgr req resourceAttrs scope
         , exporterFlush    = pure (Right ())
         , exporterShutdown = pure ()
         }
@@ -154,10 +160,12 @@ validateHeaders = traverse validateOne
 doExport
   :: Manager
   -> Request
+  -> SpanAttrs
+  -> InstrumentationScope
   -> NonEmpty FinishedSpan
   -> IO ExportResult
-doExport mgr req spans = do
-  let body = encode (encodeOtlp (NE.toList spans))
+doExport mgr req resourceAttrs scope spans = do
+  let body = encode (encodeOtlp resourceAttrs scope (NE.toList spans))
       req' = req { requestBody = RequestBodyLBS body }
   result <- try (httpLbs req' mgr)
   case result of
@@ -182,17 +190,31 @@ doExport mgr req spans = do
 -- OTLP JSON encoding
 -- ---------------------------------------------------------------------------
 
--- | Encode a list of 'FinishedSpan's as an OTLP @ExportTraceServiceRequest@.
-encodeOtlp :: [FinishedSpan] -> Value
-encodeOtlp spans = object
+-- | Encode a list of 'FinishedSpan's as an OTLP @ExportTraceServiceRequest@,
+-- embedding the given 'Resource' and 'InstrumentationScope' in the output.
+-- Every backend (Jaeger, Tempo, Datadog) uses these fields to identify the
+-- service and SDK that produced the spans.
+encodeOtlp :: SpanAttrs -> InstrumentationScope -> [FinishedSpan] -> Value
+encodeOtlp resourceAttrs scope spans = object
   [ "resourceSpans" .= [ object
-      [ "scopeSpans" .= [ object
-          [ "spans" .= map encodeSpan spans
+      [ "resource"   .= encodeResource resourceAttrs
+      , "scopeSpans" .= [ object
+          [ "scope"  .= encodeScope scope
+          , "spans"  .= map encodeSpan spans
           ]
         ]
       ]
     ]
   ]
+
+encodeResource :: SpanAttrs -> Value
+encodeResource r = object
+  [ "attributes" .= map encodeKv (Map.toList (unSpanAttrs r)) ]
+
+encodeScope :: InstrumentationScope -> Value
+encodeScope s = object $
+  [ "name" .= scopeName s ]
+  ++ maybe [] (\v -> ["version" .= v]) (scopeVersion s)
 
 encodeSpan :: FinishedSpan -> Value
 encodeSpan fs = object
@@ -210,7 +232,7 @@ encodeSpan fs = object
   , "status"            .= encodeStatus (fsStatus fs)
   ]
   where
-    hexText bs = TE.decodeUtf8 (encodeBase16 bs)
+    hexText bs = TE.decodeUtf8 (Base16.encode bs)
     toUnixNano t =
       floor (utcTimeToPOSIXSeconds t * 1_000_000_000) :: Integer
 
@@ -258,22 +280,6 @@ encodeEvent ev = object
 
 encodeStatus :: SpanStatus -> Value
 encodeStatus = \case
-  StatusUnset      -> object ["code" .= (0 :: Int)]
-  StatusOk         -> object ["code" .= (1 :: Int)]
-  StatusError em ->
-    object ["code" .= (2 :: Int), "message" .= unErrorMessage em]
-
--- ---------------------------------------------------------------------------
--- Internal: base16 encoding without the base16-bytestring import clash
--- ---------------------------------------------------------------------------
-
-encodeBase16 :: ByteString -> ByteString
-encodeBase16 = LBS.toStrict . LBS.concatMap byteToHex . LBS.fromStrict
-  where
-    byteToHex b =
-      let hi = b `div` 16
-          lo = b `mod` 16
-      in LBS.pack [hexW hi, hexW lo]
-    hexW n
-      | n < 10    = fromIntegral (fromEnum '0') + n
-      | otherwise = fromIntegral (fromEnum 'a') + n - 10
+  StatusUnset    -> object ["code" .= (0 :: Int)]
+  StatusOk       -> object ["code" .= (1 :: Int)]
+  StatusError em -> object ["code" .= (2 :: Int), "message" .= unErrorMessage em]
