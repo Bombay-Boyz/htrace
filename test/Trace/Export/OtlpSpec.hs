@@ -125,6 +125,19 @@ spec = do
           Right _ ->
             expectationFailure "expected Left but got Right"
 
+    it "rejects GzipCompression with ExporterUnsupportedCompression" $ do
+      let Right ep = mkEndpoint "http://localhost:4318"
+      result <- otlpExporter
+        (OtlpConfig ep [] 5 GzipCompression)
+        (unResource defaultResource)
+        testScope
+      case result of
+        Left (ExporterUnsupportedCompression _) -> pure ()
+        Left other ->
+          expectationFailure ("unexpected error: " <> show other)
+        Right _ ->
+          expectationFailure "expected Left but got Right"
+
   describe "Show OtlpConfig" $ do
     it "redacts Authorization header value" $ do
       let Right ep = mkEndpoint "http://localhost:4318"

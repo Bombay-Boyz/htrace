@@ -90,10 +90,12 @@ mkHttpStatus n
 
 -- | Errors that can arise when constructing an exporter.
 data ExporterInitError
-  = ExporterInvalidEndpoint   !Text
-  | ExporterInvalidHeader     !Text !Text
-  | ExporterUnsupportedScheme !Text
-  | ExporterBatchInit         !BatchConfigError
+  = ExporterInvalidEndpoint        !Text
+  | ExporterInvalidHeader          !Text !Text
+  | ExporterUnsupportedScheme      !Text
+  | ExporterUnsupportedCompression !Text
+    -- ^ The requested compression algorithm is not yet implemented.
+  | ExporterBatchInit              !BatchConfigError
   deriving stock (Show, Eq)
 
 -- | Errors that can arise when validating a 'BatchConfig'.

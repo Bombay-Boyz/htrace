@@ -72,7 +72,8 @@ mkEndpoint t =
 -- ---------------------------------------------------------------------------
 
 -- | Whether to compress the request body.
--- Note: 'GzipCompression' is defined but not yet honoured in v0.1.0.0.
+-- 'GzipCompression' is not yet implemented; 'otlpExporter' returns
+-- 'Left' 'ExporterUnsupportedCompression' if it is requested.
 data Compression
   = NoCompression
   | GzipCompression
@@ -120,25 +121,30 @@ otlpExporter
   -> SpanAttrs
   -> InstrumentationScope
   -> IO (Either ExporterInitError SpanExporter)
-otlpExporter cfg resourceAttrs scope = do
-  case validateHeaders (otlpHeaders cfg) of
-    Left e   -> pure (Left e)
-    Right hs -> do
-      mgr  <- newManager tlsManagerSettings
-      req0 <- parseRequest (Text.unpack (unEndpoint (otlpEndpoint cfg)))
-      let req = req0
-            { method         = "POST"
-            , requestHeaders =
-                (CI.mk "content-type", "application/json") : hs
-            , responseTimeout =
-                responseTimeoutMicro
-                  (round (otlpTimeout cfg * 1_000_000))
+otlpExporter cfg resourceAttrs scope =
+  case otlpCompression cfg of
+    GzipCompression ->
+      pure (Left (ExporterUnsupportedCompression
+        "GzipCompression is not yet implemented; use NoCompression"))
+    NoCompression ->
+      case validateHeaders (otlpHeaders cfg) of
+        Left e   -> pure (Left e)
+        Right hs -> do
+          mgr  <- newManager tlsManagerSettings
+          req0 <- parseRequest (Text.unpack (unEndpoint (otlpEndpoint cfg)))
+          let req = req0
+                { method         = "POST"
+                , requestHeaders =
+                    (CI.mk "content-type", "application/json") : hs
+                , responseTimeout =
+                    responseTimeoutMicro
+                      (round (otlpTimeout cfg * 1_000_000))
+                }
+          pure $ Right $ SpanExporter
+            { exporterExport   = doExport mgr req resourceAttrs scope
+            , exporterFlush    = pure (Right ())
+            , exporterShutdown = pure ()
             }
-      pure $ Right $ SpanExporter
-        { exporterExport   = doExport mgr req resourceAttrs scope
-        , exporterFlush    = pure (Right ())
-        , exporterShutdown = pure ()
-        }
 
 -- | Validate header names: must not contain control characters or colons.
 validateHeaders
