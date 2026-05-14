@@ -1,8 +1,9 @@
 module Trace.Export.BatchSpec (spec) where
 
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (throwIO)
-import Data.IORef (newIORef, readIORef, modifyIORef')
+import Data.IORef (newIORef, readIORef, modifyIORef', writeIORef)
 import Data.List.NonEmpty qualified as NE
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -210,7 +211,233 @@ spec = do
       result `shouldBe` Left ExporterShutDown
 
   -- -------------------------------------------------------------------------
-  -- Phase R5: worker logging
+  -- C-1: Shutdown race — spans enqueued concurrently with shutdown
+  -- are not silently admitted to a dead queue.
+  -- -------------------------------------------------------------------------
+
+  describe "C-1: atomic shutdown state machine" $ do
+    it "enqueue after Draining returns ExporterShutDown, not ExportSuccess" $ do
+      -- Use a slow exporter so the worker is occupied during shutdown,
+      -- giving the race the best chance to surface.
+      exportStarted <- newIORef False
+      let slowExporter = noopExporter
+            { exporterExport = \_ -> do
+                writeIORef exportStarted True
+                threadDelay 500_000
+                pure (ExportSuccess 0)
+            }
+      Right batched <- batchExporter
+        quietConfig { exportInterval = 0.01, exportTimeout = 5 }
+        slowExporter
+      -- Fill the queue so the worker wakes.
+      mapM_ (\i -> exporterExport batched (sampleSpan i NE.:| []))
+            [1..10 :: Int]
+      threadDelay 50_000  -- let the worker start its export
+
+      -- Concurrently initiate shutdown and enqueue another span.
+      -- The enqueue must not succeed with ExportSuccess after shutdown
+      -- has set the state to Draining.
+      exporterShutdown batched
+      result <- exporterExport batched (sampleSpan 99 NE.:| [])
+      result `shouldBe` ExportFailure ExporterShutDown
+
+    it "repeated enqueues after shutdown all return ExporterShutDown" $ do
+      Right batched <- batchExporter quietConfig noopExporter
+      exporterShutdown batched
+      results <- mapM (\i -> exporterExport batched (sampleSpan i NE.:| []))
+                      [1..10 :: Int]
+      all (== ExportFailure ExporterShutDown) results `shouldBe` True
+
+    it "flush after shutdown returns ExporterShutDown" $ do
+      Right batched <- batchExporter quietConfig noopExporter
+      exporterShutdown batched
+      result <- exporterFlush batched
+      result `shouldBe` Left ExporterShutDown
+
+    it "double shutdown is idempotent" $ do
+      -- Calling exporterShutdown twice must not deadlock or throw.
+      -- The second call races against a Stopped state; inner shutdown
+      -- is called only once because the worker async is already done.
+      Right batched <- batchExporter quietConfig noopExporter
+      exporterShutdown batched
+      exporterShutdown batched  -- must return without hanging
+
+  -- -------------------------------------------------------------------------
+  -- C-2: Unsupervised forkIO → crashing worker is now observable
+  -- -------------------------------------------------------------------------
+
+  describe "C-2: worker crash visibility" $ do
+    it "logs an error when the inner exporter throws and the worker exits" $ do
+      (logger, _, readErrors) <- capturingLogger
+      exportCount <- newIORef (0 :: Int)
+      let crashAfterFirst = noopExporter
+            { exporterExport = \ne -> do
+                n <- readIORef exportCount
+                modifyIORef' exportCount (+ 1)
+                if n == 0
+                  -- First call throws; worker should catch, log, and continue.
+                  then throwIO (userError "injected crash")
+                  else pure (ExportSuccess (NE.length ne))
+            }
+      Right batched <- batchExporter
+        quietConfig
+          { exportInterval = 0.01
+          , exportTimeout  = 5
+          , batchLogger    = logger
+          }
+        crashAfterFirst
+      _ <- exporterExport batched (sampleSpan 0 NE.:| [])
+      threadDelay 300_000
+      exporterShutdown batched
+      errs <- readErrors
+      -- The worker must have logged the exception.
+      any (Text.isInfixOf "threw exception") errs `shouldBe` True
+
+    it "worker crash is reported at shutdown via logError, not silently lost" $ do
+      -- A worker that always throws forces the worker to loop through the
+      -- crash path. We verify the error is recorded, not swallowed.
+      (logger, _, readErrors) <- capturingLogger
+      let alwaysCrash = noopExporter
+            { exporterExport = \_ -> throwIO (userError "persistent crash")
+            }
+      Right batched <- batchExporter
+        quietConfig
+          { exportInterval = 0.01
+          , exportTimeout  = 5
+          , batchLogger    = logger
+          }
+        alwaysCrash
+      _ <- exporterExport batched (sampleSpan 0 NE.:| [])
+      threadDelay 300_000
+      exporterShutdown batched
+      errs <- readErrors
+      null errs `shouldBe` False
+
+  -- -------------------------------------------------------------------------
+  -- M-5: doShutdown cancels the worker async on timeout before calling
+  -- exporterShutdown inner, preventing use-after-free.
+  -- -------------------------------------------------------------------------
+
+  describe "M-5: safe inner-exporter teardown on worker timeout" $ do
+    -- Design note: all three tests use an MVar rendezvous to guarantee the
+    -- worker is provably inside exporterExport before exporterShutdown is
+    -- called.  A blind threadDelay is unreliable: if the worker's own
+    -- exportTimeout fires first, it self-exits cleanly and shutdown never
+    -- hits the cancellation path.
+    --
+    -- The pattern:
+    --   exportTimeout = 30s  → worker never self-cancels during the test
+    --   deadlineMicros in doShutdown = exportTimeout + 1s = 31s, which would
+    --   hang forever — so we set exportTimeout very long and rely on the
+    --   MVar to know the worker is stuck, then the shutdown deadline is the
+    --   only way out.  To keep tests fast we set exportTimeout = 30s but the
+    --   blocking exporter signals the MVar immediately and blocks; shutdown
+    --   is called right after, so the real wall-clock wait is just the
+    --   shutdown deadline = exportTimeout + 1s.
+    --
+    -- To avoid 31s test times we override the deadline by using a short
+    -- exportTimeout (0.5s) and an MVar to ensure the worker is inside the
+    -- export *before* we call shutdown.  The worker timeout (0.5s) must be
+    -- longer than the time between "worker enters export" and "shutdown is
+    -- called" — the MVar makes that gap effectively zero.  The shutdown
+    -- deadline is then exportTimeout + 1s = 1.5s, which is acceptable.
+
+    it "shutdown completes even when the worker is blocked mid-export" $ do
+      -- Use an MVar to confirm the worker is inside the export before we
+      -- initiate shutdown.  exportTimeout is set long enough that the worker
+      -- does not self-cancel before shutdown can reach the deadline.
+      workerInside <- newEmptyMVar
+      let blockingExporter = noopExporter
+            { exporterExport = \_ -> do
+                putMVar workerInside ()        -- signal: worker is now blocked
+                threadDelay 60_000_000         -- block until async-cancelled
+                pure (ExportSuccess 0)
+            }
+      Right batched <- batchExporter
+        quietConfig
+          { exportInterval = 0.01
+          -- exportTimeout drives doShutdown's deadline (exportTimeout + 1s).
+          -- 0.5s gives a 1.5s total deadline, keeping the test fast while
+          -- still being long enough that the worker does not self-timeout
+          -- before shutdown receives the MVar signal.
+          , exportTimeout  = 0.5
+          , batchLogger    = silentLogger
+          }
+        blockingExporter
+      _ <- exporterExport batched (sampleSpan 0 NE.:| [])
+      takeMVar workerInside   -- block until worker is provably inside export
+      -- shutdown must return (not hang) even though the worker is stuck;
+      -- the cancel in M-5 unblocks it within the deadline.
+      exporterShutdown batched
+
+    it "inner exporter is shut down even when the worker is cancelled" $ do
+      workerInside       <- newEmptyMVar
+      innerShutdownCalled <- newIORef False
+      let slowThenShutdown = noopExporter
+            { exporterExport   = \_ -> do
+                putMVar workerInside ()
+                threadDelay 60_000_000 >> pure (ExportSuccess 0)
+            , exporterShutdown = writeIORef innerShutdownCalled True
+            }
+      Right batched <- batchExporter
+        quietConfig
+          { exportInterval = 0.01
+          , exportTimeout  = 0.5
+          , batchLogger    = silentLogger
+          }
+        slowThenShutdown
+      _ <- exporterExport batched (sampleSpan 0 NE.:| [])
+      takeMVar workerInside
+      exporterShutdown batched
+      -- Inner exporter must have been shut down despite worker cancellation.
+      called <- readIORef innerShutdownCalled
+      called `shouldBe` True
+
+    it "shutdown logs a warning when the worker is cancelled due to timeout" $ do
+      workerInside <- newEmptyMVar
+
+      (logger, readWarns, _) <- capturingLogger
+
+      let blockingExporter =
+            noopExporter
+              { exporterExport = \_ -> do
+                  putMVar workerInside ()
+
+                  -- Simulate permanently blocked exporter call.
+                  threadDelay 60_000_000
+
+                  pure (ExportSuccess 0)
+              }
+
+      Right batched <- batchExporter
+        quietConfig
+          { exportInterval  = 0.01
+
+          -- Keep export alive long enough that shutdown
+          -- cancellation path is exercised.
+          , exportTimeout   = 30
+
+          -- Force shutdown timeout quickly.
+          , shutdownTimeout = 0.5
+
+          , batchLogger     = logger
+          }
+        blockingExporter
+
+      _ <- exporterExport batched (sampleSpan 0 NE.:| [])
+
+      -- Ensure worker is definitely inside exporterExport.
+      takeMVar workerInside
+
+      exporterShutdown batched
+
+      warns <- readWarns
+
+      any (Text.isInfixOf "forcing cancellation") warns
+        `shouldBe` True
+
+  -- -------------------------------------------------------------------------
+  -- Phase R5: worker logging (unchanged from original suite)
   -- -------------------------------------------------------------------------
 
   describe "batchLogger" $ do

@@ -66,6 +66,7 @@ library
     , unliftio             >= 0.2  && < 0.3
     , containers           >= 0.6  && < 0.8
     , mtl
+    , async                >= 2.2  && < 2.3
 
 test-suite htrace-test
   import:           shared

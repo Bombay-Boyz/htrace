@@ -7,9 +7,10 @@ module Trace.Export.Batch
   , batchExporter
   ) where
 
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (Async, async, cancel, waitCatch)
 import Control.Concurrent.STM
-import Control.Monad (when)
+import Control.Monad (void, when)
 import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
 import Data.Text qualified as Text
@@ -17,7 +18,8 @@ import Data.Time (NominalDiffTime)
 import System.Timeout (timeout)
 import UnliftIO.Async (race)
 import Control.Exception (SomeException)
-import UnliftIO.Exception (try)
+import Control.Exception qualified as CE
+
 import Trace.Core (FinishedSpan)
 import Trace.Export.Types
 
@@ -25,39 +27,32 @@ import Trace.Export.Types
 -- Configuration
 -- ---------------------------------------------------------------------------
 
--- | Configuration for the batching exporter wrapper.
 data BatchConfig = BatchConfig
-  { maxQueueSize   :: !Int
-    -- ^ Maximum number of spans held in the queue at once.
-  , maxExportBatch :: !Int
-    -- ^ Maximum number of spans sent to the inner exporter per flush.
-  , exportInterval :: !NominalDiffTime
-    -- ^ How often the background worker wakes to flush, in seconds.
-  , exportTimeout  :: !NominalDiffTime
-    -- ^ How long a single export call may run before being abandoned.
-  , onDroppedSpans :: !(Int -> IO ())
-    -- ^ Callback invoked (on a background thread) when spans are dropped
-    --   because the queue is full.
-  , batchLogger    :: !InternalLogger
-    -- ^ Receives warnings for export failures and timeouts.
-    --   Use 'silentLogger' to suppress (e.g. in tests that expect failures).
+  { maxQueueSize    :: !Int
+  , maxExportBatch  :: !Int
+  , exportInterval  :: !NominalDiffTime
+  , exportTimeout   :: !NominalDiffTime
+  , shutdownTimeout :: !NominalDiffTime
+  , onDroppedSpans  :: !(Int -> IO ())
+  , batchLogger     :: !InternalLogger
   }
 
--- | Warn to stderr when spans are dropped.
 defaultOnDroppedSpans :: InternalLogger -> Int -> IO ()
 defaultOnDroppedSpans logger n =
   logWarn logger
-    ("htrace: dropped " <> Text.pack (show n) <> " spans (queue full)")
+    ("htrace: dropped "
+      <> Text.pack (show n)
+      <> " spans (queue full)")
 
--- | Sensible production defaults.
 defaultBatchConfig :: BatchConfig
 defaultBatchConfig = BatchConfig
-  { maxQueueSize   = 2048
-  , maxExportBatch = 512
-  , exportInterval = 5
-  , exportTimeout  = 30
-  , onDroppedSpans = defaultOnDroppedSpans stderrLogger
-  , batchLogger    = stderrLogger
+  { maxQueueSize    = 2048
+  , maxExportBatch  = 512
+  , exportInterval  = 5
+  , exportTimeout   = 30
+  , shutdownTimeout = 5
+  , onDroppedSpans  = defaultOnDroppedSpans stderrLogger
+  , batchLogger     = stderrLogger
   }
 
 -- ---------------------------------------------------------------------------
@@ -66,246 +61,486 @@ defaultBatchConfig = BatchConfig
 
 validateBatchConfig :: BatchConfig -> Maybe BatchConfigError
 validateBatchConfig c
-  | maxQueueSize c   <= 0 =
+  | maxQueueSize c <= 0 =
       Just (NonPositiveQueueSize (maxQueueSize c))
+
   | maxExportBatch c <= 0 =
       Just (NonPositiveBatchSize (maxExportBatch c))
+
   | maxExportBatch c > maxQueueSize c =
-      Just (BatchExceedsQueue (maxExportBatch c) (maxQueueSize c))
+      Just (BatchExceedsQueue
+              (maxExportBatch c)
+              (maxQueueSize c))
+
   | exportInterval c <= 0 =
       Just (NonPositiveInterval (exportInterval c))
-  | exportTimeout c  <= 0 =
+
+  | exportTimeout c <= 0 =
       Just (NonPositiveTimeout (exportTimeout c))
-  | otherwise = Nothing
+
+  | shutdownTimeout c <= 0 =
+      Just (NonPositiveShutdownTimeout
+              (shutdownTimeout c))
+
+  | otherwise =
+      Nothing
+
+-- ---------------------------------------------------------------------------
+-- Exporter lifecycle state
+-- ---------------------------------------------------------------------------
+
+data ExporterState
+  = Running
+  | Draining
+  | Stopped
+  deriving stock (Eq, Show)
 
 -- ---------------------------------------------------------------------------
 -- Constructor
 -- ---------------------------------------------------------------------------
 
--- | Wrap any 'SpanExporter' with a bounded async queue and background
--- flush worker. Returns 'Left' if the config is invalid.
---
--- After 'exporterShutdown' is called, subsequent calls to 'exporterExport'
--- and 'exporterFlush' return 'ExporterShutDown' immediately without
--- touching the inner exporter.
 batchExporter
   :: BatchConfig
   -> SpanExporter
   -> IO (Either BatchConfigError SpanExporter)
 batchExporter cfg inner =
   case validateBatchConfig cfg of
-    Just e  -> pure (Left e)
+    Just e ->
+      pure (Left e)
+
     Nothing -> do
-      queue        <- newTBQueueIO (fromIntegral (maxQueueSize cfg))
+      queue        <- newTBQueueIO
+                        (fromIntegral (maxQueueSize cfg))
+
       dropChan     <- newTBQueueIO 64
-      shutdownVar  <- newTVarIO False
-      isShutDown   <- newTVarIO False
+
+      stateVar     <- newTVarIO Running
+
       workerDone   <- newEmptyTMVarIO
       notifierDone <- newEmptyTMVarIO
-      _ <- forkIO (worker queue shutdownVar workerDone)
-      _ <- forkIO (notifier dropChan shutdownVar notifierDone)
-      pure $ Right $ SpanExporter
-        { exporterExport   = guardShutDown isShutDown (enqueue queue dropChan)
-        , exporterFlush    = guardShutDownFlush isShutDown (doFlush queue)
-        , exporterShutdown = doShutdown shutdownVar workerDone notifierDone isShutDown
-        }
+
+      workerAsync   <- async
+                         (worker queue stateVar workerDone)
+
+      notifierAsync <- async
+                         (notifier dropChan
+                                   stateVar
+                                   notifierDone)
+
+      pure $
+        Right $
+          SpanExporter
+            { exporterExport =
+                guardedEnqueue
+                  stateVar
+                  queue
+                  dropChan
+
+            , exporterFlush =
+                guardedFlush
+                  stateVar
+                  queue
+
+            , exporterShutdown =
+                doShutdown
+                  stateVar
+                  workerDone
+                  notifierDone
+                  workerAsync
+                  notifierAsync
+            }
+
   where
-    -- -----------------------------------------------------------------------
-    -- Post-shutdown guard
-    -- -----------------------------------------------------------------------
-
-    -- | Reject export calls after shutdown with an explicit error.
-    guardShutDown
-      :: TVar Bool
-      -> (NonEmpty FinishedSpan -> IO ExportResult)
-      -> NonEmpty FinishedSpan
-      -> IO ExportResult
-    guardShutDown isShutDownVar action ne = do
-      shut <- readTVarIO isShutDownVar
-      if shut
-        then pure (ExportFailure ExporterShutDown)
-        else action ne
-
-    -- | Reject flush calls after shutdown with an explicit error.
-    guardShutDownFlush
-      :: TVar Bool
-      -> IO (Either ExportError ())
-      -> IO (Either ExportError ())
-    guardShutDownFlush isShutDownVar action = do
-      shut <- readTVarIO isShutDownVar
-      if shut
-        then pure (Left ExporterShutDown)
-        else action
 
     -- -----------------------------------------------------------------------
     -- Enqueue
     -- -----------------------------------------------------------------------
 
-    enqueue queue dropChan ne = do
+    guardedEnqueue
+      :: TVar ExporterState
+      -> TBQueue FinishedSpan
+      -> TBQueue Int
+      -> NonEmpty FinishedSpan
+      -> IO ExportResult
+
+    guardedEnqueue stateVar queue dropChan ne =
+      atomically $ do
+        st <- readTVar stateVar
+
+        case st of
+          Running ->
+            enqueueSTM queue dropChan ne
+
+          Draining ->
+            pure (ExportFailure ExporterShutDown)
+
+          Stopped ->
+            pure (ExportFailure ExporterShutDown)
+
+    enqueueSTM
+      :: TBQueue FinishedSpan
+      -> TBQueue Int
+      -> NonEmpty FinishedSpan
+      -> STM ExportResult
+
+    enqueueSTM queue dropChan ne = do
       let xs = NE.toList ne
           n  = length xs
-      dropped <- atomically $ do
-        occupied <- lengthTBQueue queue
-        let space      = maxQueueSize cfg - fromIntegral occupied
-            canEnqueue = min n space
-            nDropped   = n - canEnqueue
-        mapM_ (writeTBQueue queue) (take canEnqueue xs)
-        when (nDropped > 0) $ do
-          full <- isFullTBQueue dropChan
-          when (not full) $ writeTBQueue dropChan nDropped
-        pure nDropped
-      pure (ExportSuccess (n - dropped))
+
+      occupied <- lengthTBQueue queue
+
+      let space =
+            maxQueueSize cfg - fromIntegral occupied
+
+          canEnqueue =
+            min n space
+
+          nDropped =
+            n - canEnqueue
+
+      mapM_ (writeTBQueue queue)
+            (take canEnqueue xs)
+
+      when (nDropped > 0) $ do
+        full <- isFullTBQueue dropChan
+
+        when (not full) $
+          writeTBQueue dropChan nDropped
+
+      pure (ExportSuccess (n - nDropped))
 
     -- -----------------------------------------------------------------------
-    -- Notifier thread: drains dropChan and calls onDroppedSpans
+    -- Flush
     -- -----------------------------------------------------------------------
 
-    notifier dropChan shutdownVar done = loop
+    guardedFlush
+      :: TVar ExporterState
+      -> TBQueue FinishedSpan
+      -> IO (Either ExportError ())
+
+    guardedFlush stateVar queue = do
+      st <- readTVarIO stateVar
+
+      case st of
+        Running ->
+          doFlush queue
+
+        Draining ->
+          pure (Left ExporterShutDown)
+
+        Stopped ->
+          pure (Left ExporterShutDown)
+
+    -- -----------------------------------------------------------------------
+    -- Drop notifier
+    -- -----------------------------------------------------------------------
+
+    notifier dropChan stateVar done =
+      loop
       where
         loop = do
           mn <- atomically $
-            (Just <$> readTBQueue dropChan) `orElse` do
-              shutting <- readTVar shutdownVar
-              empty    <- isEmptyTBQueue dropChan
-              if shutting && empty
+            (Just <$> readTBQueue dropChan)
+              `orElse`
+            do
+              st <- readTVar stateVar
+              empty <- isEmptyTBQueue dropChan
+
+              if st /= Running && empty
                 then pure Nothing
                 else retry
+
           case mn of
-            Just n  -> onDroppedSpans cfg n >> loop
-            Nothing -> atomically (putTMVar done ())
+            Just n -> do
+              onDroppedSpans cfg n
+              loop
+
+            Nothing ->
+              atomically
+                (putTMVar done ())
 
     -- -----------------------------------------------------------------------
-    -- Safe log: logger failures must never crash the worker
+    -- Safe logging
     -- -----------------------------------------------------------------------
 
-    safeLog :: (InternalLogger -> Text.Text -> IO ()) -> Text.Text -> IO ()
+    syncOnly :: SomeException -> Maybe SomeException
+    syncOnly ex =
+      case CE.fromException ex of
+        Just (CE.SomeAsyncException _) ->
+          Nothing
+
+        Nothing ->
+          Just ex
+
+    safeLog
+      :: (InternalLogger -> Text.Text -> IO ())
+      -> Text.Text
+      -> IO ()
+
     safeLog f msg = do
-      result <- try (f (batchLogger cfg) msg) :: IO (Either SomeException ())
+      result <-
+        CE.tryJust syncOnly
+          (f (batchLogger cfg) msg)
+
       case result of
-        Right () -> pure ()
-        Left  _  -> pure ()
+        Right () ->
+          pure ()
+
+        Left _ ->
+          pure ()
 
     -- -----------------------------------------------------------------------
-    -- Worker thread: periodically drains queue and exports
+    -- Worker
     -- -----------------------------------------------------------------------
 
-    worker queue shutdownVar done = loop
+    worker queue stateVar done =
+      loop
       where
-        intervalMicros = round (realToFrac (exportInterval cfg) * 1_000_000 :: Double)
-        timeoutMicros  = round (realToFrac (exportTimeout  cfg) * 1_000_000 :: Double)
+
+        intervalMicros =
+          round
+            ( realToFrac (exportInterval cfg)
+            * 1_000_000
+            :: Double
+            )
+
+        timeoutMicros =
+          round
+            ( realToFrac (exportTimeout cfg)
+            * 1_000_000
+            :: Double
+            )
 
         loop = do
-          -- Wake on: interval elapsed OR queue has a full batch OR shutdown.
-          _ <- race
-            (threadDelay intervalMicros)
-            (atomically $ do
-              shutting <- readTVar shutdownVar
-              if shutting
-                then pure ()
-                else do
-                  len <- lengthTBQueue queue
-                  if fromIntegral len >= maxExportBatch cfg
-                    then pure ()
-                    else retry)
 
-          -- Drain up to maxExportBatch spans.
-          batch <- atomically (drainBatch queue (maxExportBatch cfg))
+          _ <- race
+                (threadDelay intervalMicros)
+                (atomically $ do
+                  st <- readTVar stateVar
+
+                  if st /= Running
+                    then pure ()
+                    else do
+                      len <- lengthTBQueue queue
+
+                      if fromIntegral len
+                           >= maxExportBatch cfg
+                        then pure ()
+                        else retry
+                )
+
+          batch <-
+            atomically $
+              drainBatch
+                queue
+                (maxExportBatch cfg)
+
           case NE.nonEmpty batch of
-            Nothing -> pure ()
+
+            Nothing ->
+              pure ()
+
             Just ne -> do
-              mResult <- timeout timeoutMicros
-                           (try (exporterExport inner ne)
-                             :: IO (Either SomeException ExportResult))
+
+              mResult <-
+                CE.tryJust syncOnly $
+                  timeout timeoutMicros
+                    (exporterExport inner ne)
+
               case mResult of
-                Nothing ->
-                  safeLog logWarn
-                    (  "htrace: export timed out after "
-                    <> Text.pack (show (exportTimeout cfg))
-                    <> "s; "
-                    <> Text.pack (show (NE.length ne))
-                    <> " spans abandoned"
-                    )
-                Just (Left ex) ->
+
+                Left ex ->
                   safeLog logError
-                    (  "htrace: exporter threw exception: "
+                    ( "htrace: exporter threw exception: "
                     <> Text.pack (show ex)
                     )
-                Just (Right (ExportFailure err)) ->
+
+                Right Nothing ->
                   safeLog logWarn
-                    (  "htrace: export returned failure: "
+                    ( "htrace: export timed out after "
+                    <> Text.pack
+                         (show (exportTimeout cfg))
+                    <> "s; "
+                    <> Text.pack
+                         (show (NE.length ne))
+                    <> " spans abandoned"
+                    )
+
+                Right (Just (ExportFailure err)) ->
+                  safeLog logWarn
+                    ( "htrace: export returned failure: "
                     <> Text.pack (show err)
                     )
-                Just (Right (ExportSuccess _)) ->
+
+                Right (Just (ExportSuccess _)) ->
                   pure ()
 
-          -- Exit only when shutdown is set AND the queue is empty.
           shouldExit <- atomically $ do
-            shutting <- readTVar shutdownVar
-            empty    <- isEmptyTBQueue queue
-            pure (shutting && empty)
+            st <- readTVar stateVar
+            empty <- isEmptyTBQueue queue
+
+            pure
+              (st /= Running && empty)
+
           if shouldExit
-            then atomically (putTMVar done ())
+            then atomically
+                   (putTMVar done ())
             else loop
 
     -- -----------------------------------------------------------------------
-    -- Flush: drain and export synchronously, bounded by exportTimeout
+    -- Flush implementation
     -- -----------------------------------------------------------------------
 
     doFlush queue = do
-      batch <- atomically (drainBatch queue (maxQueueSize cfg))
+
+      batch <-
+        atomically $
+          drainBatch
+            queue
+            (maxQueueSize cfg)
+
       case NE.nonEmpty batch of
-        Nothing -> pure (Right ())
-        Just ne -> do
-          let flushTimeoutMicros =
-                round (realToFrac (exportTimeout cfg) * 1_000_000 :: Double)
-          mResult <- timeout flushTimeoutMicros (exporterExport inner ne)
-          case mResult of
-            Nothing                -> pure (Left (ExportTimeout (exportTimeout cfg)))
-            Just (ExportSuccess _) -> pure (Right ())
-            Just (ExportFailure e) -> pure (Left e)
 
-    -- -----------------------------------------------------------------------
-    -- Shutdown: signal threads and wait for clean exit
-    -- -----------------------------------------------------------------------
-
-    doShutdown shutdownVar workerDone notifierDone isShutDownVar = do
-      atomically (writeTVar shutdownVar True)
-      -- Give the worker and notifier time to drain and exit cleanly.
-      -- The deadline is exportTimeout + 1s: enough for the worker's
-      -- current in-flight export to complete or time out before us.
-      let deadlineMicros =
-            round (realToFrac (exportTimeout cfg + 1) * 1_000_000 :: Double)
-      workerExited <- timeout deadlineMicros
-                        (atomically (takeTMVar workerDone))
-      case workerExited of
         Nothing ->
+          pure (Right ())
+
+        Just ne -> do
+
+          let flushTimeoutMicros =
+                round
+                  ( realToFrac
+                      (exportTimeout cfg)
+                  * 1_000_000
+                  :: Double
+                  )
+
+          mResult <-
+            timeout flushTimeoutMicros
+              (exporterExport inner ne)
+
+          case mResult of
+
+            Nothing ->
+              pure
+                (Left
+                  (ExportTimeout
+                    (exportTimeout cfg)
+                  )
+                )
+
+            Just (ExportSuccess _) ->
+              pure (Right ())
+
+            Just (ExportFailure e) ->
+              pure (Left e)
+
+    -- -----------------------------------------------------------------------
+    -- Shutdown
+    -- -----------------------------------------------------------------------
+
+    doShutdown
+      :: TVar ExporterState
+      -> TMVar ()
+      -> TMVar ()
+      -> Async ()
+      -> Async ()
+      -> IO ()
+
+    doShutdown
+      stateVar
+      workerDone
+      notifierDone
+      workerAsync
+      notifierAsync = do
+
+      atomically $
+        writeTVar stateVar Draining
+
+      let deadlineMicros =
+            round
+              ( realToFrac
+                  (shutdownTimeout cfg)
+              * 1_000_000
+              :: Double
+              )
+
+      workerExited <-
+        timeout deadlineMicros
+          (atomically
+            (takeTMVar workerDone)
+          )
+
+      case workerExited of
+
+        Just () -> do
+
+          result <- waitCatch workerAsync
+
+          case result of
+
+            Left ex ->
+              safeLog logError
+                ( "htrace: worker thread crashed: "
+                <> Text.pack (show ex)
+                )
+
+            Right () ->
+              pure ()
+
+        Nothing -> do
+
+          cancel workerAsync
+
+          -- Important:
+          -- ensure cancellation has completed before teardown.
+          void (waitCatch workerAsync)
+
           safeLog logWarn
             "htrace: worker did not exit within shutdown deadline; \
-            \forcing shutdown. Some spans may not have been exported."
-        Just () -> pure ()
-      notifierExited <- timeout deadlineMicros
-                          (atomically (takeTMVar notifierDone))
+            \forcing cancellation. Some spans may not have been exported."
+
+      notifierExited <-
+        timeout deadlineMicros
+          (atomically
+            (takeTMVar notifierDone)
+          )
+
       case notifierExited of
-        Nothing ->
+
+        Just () ->
+          pure ()
+
+        Nothing -> do
+
+          cancel notifierAsync
+
+          void (waitCatch notifierAsync)
+
           safeLog logWarn
             "htrace: notifier did not exit within shutdown deadline."
-        Just () -> pure ()
-      -- Mark as shut down before releasing inner exporter resources so
-      -- any concurrent export calls see the flag immediately.
-      atomically (writeTVar isShutDownVar True)
-      -- Always shut down the inner exporter regardless of whether
-      -- threads exited cleanly — resource release must not be skipped.
+
+      atomically $
+        writeTVar stateVar Stopped
+
       exporterShutdown inner
 
     -- -----------------------------------------------------------------------
-    -- Helper: atomically dequeue up to n spans
+    -- Drain helper
     -- -----------------------------------------------------------------------
 
-    drainBatch queue maxN = go [] 0
+    drainBatch queue maxN =
+      go [] 0
       where
+
         go acc i
-          | i >= maxN = pure (reverse acc)
+          | i >= maxN =
+              pure (reverse acc)
+
           | otherwise =
               tryReadTBQueue queue >>= \case
-                Nothing -> pure (reverse acc)
-                Just s  -> go (s : acc) (i + 1)
+
+                Nothing ->
+                  pure (reverse acc)
+
+                Just s ->
+                  go (s : acc) (i + 1)
