@@ -31,7 +31,6 @@ import Data.Text.Read qualified as TR
 import System.Environment (lookupEnv)
 
 import Trace.Attributes
-import Trace.Core
 import Trace.Export.Otlp
 import Trace.Export.Types
 
@@ -321,11 +320,11 @@ loadSamplerConfig = do
       case arg of
         Nothing -> pure $ Failure $ NE.singleton $
           MissingRequiredVar (EnvVarName "OTEL_TRACES_SAMPLER_ARG")
-        Just s  -> case parseDouble s of
+        Just str -> case parseDouble str of
           Nothing -> pure $ Failure $ NE.singleton $
             InvalidVarValue
               (EnvVarName "OTEL_TRACES_SAMPLER_ARG")
-              (Text.pack s)
+              (Text.pack str)
               "expected a number in [0, 1]"
           Just d  -> case mkSampleRate d of
             Left e   -> pure $ Failure $ NE.singleton e
@@ -339,11 +338,11 @@ loadSamplerConfig = do
       case arg of
         Nothing -> pure $ Failure $ NE.singleton $
           MissingRequiredVar (EnvVarName "OTEL_TRACES_SAMPLER_ARG")
-        Just s  -> case parseDouble s of
+        Just str -> case parseDouble str of
           Nothing -> pure $ Failure $ NE.singleton $
             InvalidVarValue
               (EnvVarName "OTEL_TRACES_SAMPLER_ARG")
-              (Text.pack s)
+              (Text.pack str)
               "expected a number in [0, 1]"
           Just d  -> case mkSampleRate d of
             Left e   -> pure $ Failure $ NE.singleton e
@@ -381,10 +380,10 @@ loadResource = do
         (EnvVarName "OTEL_SERVICE_NAME")
         ""
         "service.name must be non-empty"
-    Just s  ->
+    Just str ->
       pure $ case vExtraKvs of
         Failure errs -> Failure errs
-        Success kvs  -> case mkResource (Text.pack s) kvs of
+        Success kvs  -> case mkResource (Text.pack str) kvs of
           Left e  -> Failure (NE.singleton e)
           Right r -> Success r
   where

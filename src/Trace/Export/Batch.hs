@@ -18,8 +18,9 @@ import System.Timeout (timeout)
 import UnliftIO.Async (race)
 import Control.Exception (SomeException)
 import UnliftIO.Exception (try)
-import Trace.Export.Types
 import Trace.Core (FinishedSpan)
+import Trace.Export.Types
+
 -- ---------------------------------------------------------------------------
 -- Configuration
 -- ---------------------------------------------------------------------------
@@ -106,8 +107,7 @@ batchExporter cfg inner =
       pure $ Right $ SpanExporter
         { exporterExport   = guardShutDown isShutDown (enqueue queue dropChan)
         , exporterFlush    = guardShutDownFlush isShutDown (doFlush queue)
-        , exporterShutdown = doShutdown queue shutdownVar
-                               workerDone notifierDone isShutDown
+        , exporterShutdown = doShutdown shutdownVar workerDone notifierDone isShutDown
         }
   where
     -- -----------------------------------------------------------------------
@@ -146,7 +146,7 @@ batchExporter cfg inner =
           n  = length xs
       dropped <- atomically $ do
         occupied <- lengthTBQueue queue
-        let space      = fromIntegral (maxQueueSize cfg) - fromIntegral occupied
+        let space      = maxQueueSize cfg - fromIntegral occupied
             canEnqueue = min n space
             nDropped   = n - canEnqueue
         mapM_ (writeTBQueue queue) (take canEnqueue xs)
@@ -268,7 +268,7 @@ batchExporter cfg inner =
     -- Shutdown: signal threads and wait for clean exit
     -- -----------------------------------------------------------------------
 
-    doShutdown _queue shutdownVar workerDone notifierDone isShutDownVar = do
+    doShutdown shutdownVar workerDone notifierDone isShutDownVar = do
       atomically (writeTVar shutdownVar True)
       -- Give the worker and notifier time to drain and exit cleanly.
       -- The deadline is exportTimeout + 1s: enough for the worker's
