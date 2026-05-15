@@ -86,6 +86,24 @@ validateBatchConfig c
       Nothing
 
 -- ---------------------------------------------------------------------------
+-- Worker queue item
+-- ---------------------------------------------------------------------------
+
+-- | Items placed on the internal worker queue.
+--
+-- 'SpanItem' carries one batch of spans to export.
+--
+-- 'FlushBarrier' is a sentinel injected by 'exporterFlush'.  When the
+-- worker encounters it, it has already exported every span that was ahead
+-- of it in the queue, so it fills the 'TMVar' to unblock the caller.
+-- This routes all flush requests through the single worker thread,
+-- eliminating the concurrent-drain race that existed when flush drained
+-- the queue directly (H-1).
+data WorkItem
+  = SpanItem  !(NonEmpty FinishedSpan)
+  | FlushBarrier !(TMVar (Either ExportError ()))
+
+-- ---------------------------------------------------------------------------
 -- Exporter lifecycle state
 -- ---------------------------------------------------------------------------
 
@@ -109,46 +127,30 @@ batchExporter cfg inner =
       pure (Left e)
 
     Nothing -> do
-      queue        <- newTBQueueIO
-                        (fromIntegral (maxQueueSize cfg))
+      queue <- newTBQueueIO (fromIntegral (maxQueueSize cfg))
 
-      dropChan     <- newTBQueueIO 64
+      -- Atomic counter for dropped span counts.
+      -- The notifier thread wakes whenever this is non-zero, reports
+      -- the accumulated count to the callback, and resets it to zero —
+      -- all in one STM transaction.  Using a counter instead of a
+      -- bounded channel means overflow events are never silently
+      -- discarded (H-4).
+      dropCounter <- newTVarIO (0 :: Int)
 
       stateVar     <- newTVarIO Running
-
       workerDone   <- newEmptyTMVarIO
       notifierDone <- newEmptyTMVarIO
 
-      workerAsync   <- async
-                         (worker queue stateVar workerDone)
+      workerAsync   <- async (worker   queue       stateVar workerDone)
+      notifierAsync <- async (notifier dropCounter stateVar notifierDone)
 
-      notifierAsync <- async
-                         (notifier dropChan
-                                   stateVar
-                                   notifierDone)
-
-      pure $
-        Right $
-          SpanExporter
-            { exporterExport =
-                guardedEnqueue
-                  stateVar
-                  queue
-                  dropChan
-
-            , exporterFlush =
-                guardedFlush
-                  stateVar
-                  queue
-
-            , exporterShutdown =
-                doShutdown
-                  stateVar
-                  workerDone
-                  notifierDone
-                  workerAsync
-                  notifierAsync
-            }
+      pure $ Right $ SpanExporter
+        { exporterExport   = guardedEnqueue stateVar queue dropCounter
+        , exporterFlush    = guardedFlush   stateVar queue
+        , exporterShutdown =
+            doShutdown stateVar workerDone notifierDone
+                       workerAsync notifierAsync
+        }
 
   where
 
@@ -158,54 +160,42 @@ batchExporter cfg inner =
 
     guardedEnqueue
       :: TVar ExporterState
-      -> TBQueue FinishedSpan
-      -> TBQueue Int
+      -> TBQueue WorkItem
+      -> TVar Int
       -> NonEmpty FinishedSpan
       -> IO ExportResult
 
-    guardedEnqueue stateVar queue dropChan ne =
+    guardedEnqueue stateVar queue dropCounter ne =
       atomically $ do
         st <- readTVar stateVar
-
         case st of
-          Running ->
-            enqueueSTM queue dropChan ne
-
-          Draining ->
-            pure (ExportFailure ExporterShutDown)
-
-          Stopped ->
-            pure (ExportFailure ExporterShutDown)
+          Running  -> enqueueSTM queue dropCounter ne
+          Draining -> pure (ExportFailure ExporterShutDown)
+          Stopped  -> pure (ExportFailure ExporterShutDown)
 
     enqueueSTM
-      :: TBQueue FinishedSpan
-      -> TBQueue Int
+      :: TBQueue WorkItem
+      -> TVar Int
       -> NonEmpty FinishedSpan
       -> STM ExportResult
 
-    enqueueSTM queue dropChan ne = do
-      let xs = NE.toList ne
-          n  = length xs
-
+    enqueueSTM queue dropCounter ne = do
+      let xs         = NE.toList ne
+          n          = length xs
       occupied <- lengthTBQueue queue
+      let space      = maxQueueSize cfg - fromIntegral occupied
+          canEnqueue = min n space
+          nDropped   = n - canEnqueue
 
-      let space =
-            maxQueueSize cfg - fromIntegral occupied
+      -- Write one SpanItem wrapping all admissible spans.
+      case NE.nonEmpty (take canEnqueue xs) of
+        Just batch -> writeTBQueue queue (SpanItem batch)
+        Nothing    -> pure ()
 
-          canEnqueue =
-            min n space
-
-          nDropped =
-            n - canEnqueue
-
-      mapM_ (writeTBQueue queue)
-            (take canEnqueue xs)
-
-      when (nDropped > 0) $ do
-        full <- isFullTBQueue dropChan
-
-        when (not full) $
-          writeTBQueue dropChan nDropped
+      -- Accumulate drops atomically; the counter is unbounded so no
+      -- overflow event is ever silently discarded (H-4).
+      when (nDropped > 0) $
+        modifyTVar' dropCounter (+ nDropped)
 
       pure (ExportSuccess (n - nDropped))
 
@@ -213,51 +203,58 @@ batchExporter cfg inner =
     -- Flush
     -- -----------------------------------------------------------------------
 
+    -- | Flush by injecting a 'FlushBarrier' into the worker queue and
+    -- blocking until the worker signals it (H-1).
+    --
+    -- The worker exports every span ahead of the barrier before filling
+    -- the 'TMVar', so this call returns only after all buffered spans
+    -- have been handed to the inner exporter.  No direct queue drain or
+    -- inner-exporter call happens on this thread — everything goes
+    -- through the single worker path.
     guardedFlush
       :: TVar ExporterState
-      -> TBQueue FinishedSpan
+      -> TBQueue WorkItem
       -> IO (Either ExportError ())
 
     guardedFlush stateVar queue = do
       st <- readTVarIO stateVar
-
       case st of
-        Running ->
-          doFlush queue
-
-        Draining ->
-          pure (Left ExporterShutDown)
-
-        Stopped ->
-          pure (Left ExporterShutDown)
+        Draining -> pure (Left ExporterShutDown)
+        Stopped  -> pure (Left ExporterShutDown)
+        Running  -> do
+          barrier <- newEmptyTMVarIO
+          atomically (writeTBQueue queue (FlushBarrier barrier))
+          atomically (takeTMVar barrier)
 
     -- -----------------------------------------------------------------------
     -- Drop notifier
     -- -----------------------------------------------------------------------
 
-    notifier dropChan stateVar done =
-      loop
+    -- | Watch the atomic drop counter and call 'onDroppedSpans' whenever
+    -- the count is non-zero.  The read and reset happen in one STM
+    -- transaction, so no count is ever lost (H-4).
+    -- Exits when state is no longer 'Running' and the counter is zero.
+    notifier
+      :: TVar Int
+      -> TVar ExporterState
+      -> TMVar ()
+      -> IO ()
+
+    notifier dropCounter stateVar done = loop
       where
         loop = do
-          mn <- atomically $
-            (Just <$> readTBQueue dropChan)
-              `orElse`
-            do
-              st <- readTVar stateVar
-              empty <- isEmptyTBQueue dropChan
-
-              if st /= Running && empty
-                then pure Nothing
-                else retry
+          mn <- atomically $ do
+            n  <- readTVar dropCounter
+            st <- readTVar stateVar
+            if n > 0
+              then writeTVar dropCounter 0 >> pure (Just n)
+              else if st /= Running
+                     then pure Nothing
+                     else retry
 
           case mn of
-            Just n -> do
-              onDroppedSpans cfg n
-              loop
-
-            Nothing ->
-              atomically
-                (putTMVar done ())
+            Just n  -> onDroppedSpans cfg n >> loop
+            Nothing -> atomically (putTMVar done ())
 
     -- -----------------------------------------------------------------------
     -- Safe logging
@@ -266,173 +263,158 @@ batchExporter cfg inner =
     syncOnly :: SomeException -> Maybe SomeException
     syncOnly ex =
       case CE.fromException ex of
-        Just (CE.SomeAsyncException _) ->
-          Nothing
-
-        Nothing ->
-          Just ex
+        Just (CE.SomeAsyncException _) -> Nothing
+        Nothing                        -> Just ex
 
     safeLog
       :: (InternalLogger -> Text.Text -> IO ())
       -> Text.Text
       -> IO ()
-
     safeLog f msg = do
-      result <-
-        CE.tryJust syncOnly
-          (f (batchLogger cfg) msg)
-
+      result <- CE.tryJust syncOnly (f (batchLogger cfg) msg)
       case result of
-        Right () ->
-          pure ()
-
-        Left _ ->
-          pure ()
+        Right () -> pure ()
+        Left  _  -> pure ()
 
     -- -----------------------------------------------------------------------
     -- Worker
     -- -----------------------------------------------------------------------
 
-    worker queue stateVar done =
-      loop
+    worker
+      :: TBQueue WorkItem
+      -> TVar ExporterState
+      -> TMVar ()
+      -> IO ()
+
+    worker queue stateVar done = loop
       where
-
+        intervalMicros :: Int
         intervalMicros =
-          round
-            ( realToFrac (exportInterval cfg)
-            * 1_000_000
-            :: Double
-            )
+          round (realToFrac (exportInterval cfg) * 1_000_000 :: Double)
 
+        timeoutMicros :: Int
         timeoutMicros =
-          round
-            ( realToFrac (exportTimeout cfg)
-            * 1_000_000
-            :: Double
-            )
+          round (realToFrac (exportTimeout cfg) * 1_000_000 :: Double)
 
         loop = do
-
+          -- Wake when: the timer fires, the queue has a full batch,
+          -- a FlushBarrier is anywhere in the queue, or state has
+          -- changed away from Running (drain-and-exit signal).
           _ <- race
-                (threadDelay intervalMicros)
-                (atomically $ do
-                  st <- readTVar stateVar
+                 (threadDelay intervalMicros)
+                 (atomically $ do
+                   st <- readTVar stateVar
+                   if st /= Running
+                     then pure ()
+                     else do
+                       len <- lengthTBQueue queue
+                       if fromIntegral len >= maxExportBatch cfg
+                         then pure ()
+                         else do
+                           -- Wake immediately when any item in the queue
+                           -- is a FlushBarrier, regardless of depth.
+                           found <- containsBarrier queue
+                           if found then pure () else retry)
 
-                  if st /= Running
-                    then pure ()
-                    else do
-                      len <- lengthTBQueue queue
+          -- Process all available items, honouring flush barriers (H-1).
+          processQueue
 
-                      if fromIntegral len
-                           >= maxExportBatch cfg
-                        then pure ()
-                        else retry
-                )
+          shouldExit <- atomically $ do
+            st    <- readTVar stateVar
+            empty <- isEmptyTBQueue queue
+            pure (st /= Running && empty)
 
-          batch <-
-            atomically $
-              drainBatch
-                queue
-                (maxExportBatch cfg)
+          if shouldExit
+            then atomically (putTMVar done ())
+            else loop
 
-          case NE.nonEmpty batch of
+        -- | Drain up to 'maxExportBatch' items from the queue and
+        -- process them.  Spans are collected into a batch; a
+        -- 'FlushBarrier' causes the accumulated batch (if any) to be
+        -- exported immediately and the barrier to be signalled before
+        -- processing any further items.
+        processQueue :: IO ()
+        processQueue = do
+          items <- atomically (drainItems (maxExportBatch cfg))
+          case items of
+            [] -> pure ()
+            _  -> processItems items
 
-            Nothing ->
-              pure ()
+        processItems :: [WorkItem] -> IO ()
+        processItems [] = pure ()
+        processItems items = do
+          let (spanItems, rest) = break isBarrier items
+              spans = [ne | SpanItem ne <- spanItems]
 
+          -- Export any spans collected before the next barrier.
+          case NE.nonEmpty (concatMap NE.toList spans) of
+            Nothing -> pure ()
             Just ne -> do
-
               mResult <-
                 CE.tryJust syncOnly $
-                  timeout timeoutMicros
-                    (exporterExport inner ne)
-
+                  timeout timeoutMicros (exporterExport inner ne)
               case mResult of
-
                 Left ex ->
                   safeLog logError
-                    ( "htrace: exporter threw exception: "
-                    <> Text.pack (show ex)
-                    )
-
+                    ("htrace: exporter threw exception: "
+                      <> Text.pack (show ex))
                 Right Nothing ->
                   safeLog logWarn
-                    ( "htrace: export timed out after "
-                    <> Text.pack
-                         (show (exportTimeout cfg))
-                    <> "s; "
-                    <> Text.pack
-                         (show (NE.length ne))
-                    <> " spans abandoned"
-                    )
-
+                    ("htrace: export timed out after "
+                      <> Text.pack (show (exportTimeout cfg))
+                      <> "s; "
+                      <> Text.pack (show (NE.length ne))
+                      <> " spans abandoned")
                 Right (Just (ExportFailure err)) ->
                   safeLog logWarn
-                    ( "htrace: export returned failure: "
-                    <> Text.pack (show err)
-                    )
-
+                    ("htrace: export returned failure: "
+                      <> Text.pack (show err))
                 Right (Just (ExportSuccess _)) ->
                   pure ()
 
-          shouldExit <- atomically $ do
-            st <- readTVar stateVar
-            empty <- isEmptyTBQueue queue
+          -- Signal the first barrier encountered (if any) and recurse.
+          case rest of
+            (FlushBarrier tmv : remainder) -> do
+              atomically (putTMVar tmv (Right ()))
+              processItems remainder
+            _ ->
+              pure ()
 
-            pure
-              (st /= Running && empty)
+        isBarrier :: WorkItem -> Bool
+        isBarrier (FlushBarrier _) = True
+        isBarrier _                = False
 
-          if shouldExit
-            then atomically
-                   (putTMVar done ())
-            else loop
+        -- | Scan the entire queue for a 'FlushBarrier', restoring all
+        -- items in their original order afterwards.
+        -- 'drainAll' returns items in reverse (last-dequeued first), so
+        -- feeding them back via 'unGetTBQueue' (which pushes to the front)
+        -- restores the original FIFO order.
+        containsBarrier :: TBQueue WorkItem -> STM Bool
+        containsBarrier q = do
+          items <- drainAll q
+          mapM_ (unGetTBQueue q) items
+          pure (any isBarrier items)
 
-    -- -----------------------------------------------------------------------
-    -- Flush implementation
-    -- -----------------------------------------------------------------------
+        -- | Drain every item from the queue without blocking.
+        -- Returns items in reverse order (most-recently-dequeued first).
+        drainAll :: TBQueue WorkItem -> STM [WorkItem]
+        drainAll q = go []
+          where
+            go acc =
+              tryReadTBQueue q >>= \case
+                Nothing -> pure acc
+                Just it -> go (it : acc)
 
-    doFlush queue = do
-
-      batch <-
-        atomically $
-          drainBatch
-            queue
-            (maxQueueSize cfg)
-
-      case NE.nonEmpty batch of
-
-        Nothing ->
-          pure (Right ())
-
-        Just ne -> do
-
-          let flushTimeoutMicros =
-                round
-                  ( realToFrac
-                      (exportTimeout cfg)
-                  * 1_000_000
-                  :: Double
-                  )
-
-          mResult <-
-            timeout flushTimeoutMicros
-              (exporterExport inner ne)
-
-          case mResult of
-
-            Nothing ->
-              pure
-                (Left
-                  (ExportTimeout
-                    (exportTimeout cfg)
-                  )
-                )
-
-            Just (ExportSuccess _) ->
-              pure (Right ())
-
-            Just (ExportFailure e) ->
-              pure (Left e)
+        -- | Read up to 'maxN' items from the queue without blocking.
+        drainItems :: Int -> STM [WorkItem]
+        drainItems maxN = go [] 0
+          where
+            go acc i
+              | i >= maxN = pure (reverse acc)
+              | otherwise =
+                  tryReadTBQueue queue >>= \case
+                    Nothing -> pure (reverse acc)
+                    Just it -> go (it : acc) (i + 1)
 
     -- -----------------------------------------------------------------------
     -- Shutdown
@@ -446,101 +428,49 @@ batchExporter cfg inner =
       -> Async ()
       -> IO ()
 
-    doShutdown
-      stateVar
-      workerDone
-      notifierDone
-      workerAsync
-      notifierAsync = do
+    doShutdown stateVar workerDone notifierDone workerAsync notifierAsync = do
 
-      atomically $
-        writeTVar stateVar Draining
+      -- Immediately stop accepting new enqueues (C-1).
+      atomically (writeTVar stateVar Draining)
 
-      let deadlineMicros =
-            round
-              ( realToFrac
-                  (shutdownTimeout cfg)
-              * 1_000_000
-              :: Double
-              )
+      let deadlineMicros :: Int
+          deadlineMicros =
+            round (realToFrac (shutdownTimeout cfg) * 1_000_000 :: Double)
 
+      -- Wait for the worker to drain and exit.
       workerExited <-
-        timeout deadlineMicros
-          (atomically
-            (takeTMVar workerDone)
-          )
+        timeout deadlineMicros (atomically (takeTMVar workerDone))
 
       case workerExited of
-
         Just () -> do
-
           result <- waitCatch workerAsync
-
           case result of
-
             Left ex ->
               safeLog logError
-                ( "htrace: worker thread crashed: "
-                <> Text.pack (show ex)
-                )
-
-            Right () ->
-              pure ()
+                ("htrace: worker thread crashed: " <> Text.pack (show ex))
+            Right () -> pure ()
 
         Nothing -> do
-
+          -- Hard-cancel the worker so the inner exporter is not used
+          -- after we tear it down below (M-5).
           cancel workerAsync
-
-          -- Important:
-          -- ensure cancellation has completed before teardown.
           void (waitCatch workerAsync)
-
           safeLog logWarn
             "htrace: worker did not exit within shutdown deadline; \
             \forcing cancellation. Some spans may not have been exported."
 
+      -- Wait for the notifier to drain and exit.
       notifierExited <-
-        timeout deadlineMicros
-          (atomically
-            (takeTMVar notifierDone)
-          )
+        timeout deadlineMicros (atomically (takeTMVar notifierDone))
 
       case notifierExited of
-
-        Just () ->
-          pure ()
-
+        Just () -> pure ()
         Nothing -> do
-
           cancel notifierAsync
-
           void (waitCatch notifierAsync)
-
           safeLog logWarn
             "htrace: notifier did not exit within shutdown deadline."
 
-      atomically $
-        writeTVar stateVar Stopped
+      atomically (writeTVar stateVar Stopped)
 
       exporterShutdown inner
-
-    -- -----------------------------------------------------------------------
-    -- Drain helper
-    -- -----------------------------------------------------------------------
-
-    drainBatch queue maxN =
-      go [] 0
-      where
-
-        go acc i
-          | i >= maxN =
-              pure (reverse acc)
-
-          | otherwise =
-              tryReadTBQueue queue >>= \case
-
-                Nothing ->
-                  pure (reverse acc)
-
-                Just s ->
-                  go (s : acc) (i + 1)

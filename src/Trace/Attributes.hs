@@ -50,9 +50,11 @@ data AttrValue
 newtype SpanAttrs = SpanAttrs { unSpanAttrs :: Map AttrKey AttrValue }
   deriving stock (Show, Eq)
 
--- | Right-biased merge: keys in the right operand override the left.
+-- | Left-biased merge: keys in the left operand take precedence,
+-- following the standard Haskell 'Semigroup' convention where
+-- @x '<>' y@ means @x@ wins on collision.
 instance Semigroup SpanAttrs where
-  SpanAttrs a <> SpanAttrs b = SpanAttrs (Map.union b a)
+  SpanAttrs a <> SpanAttrs b = SpanAttrs (Map.union a b)
 
 instance Monoid SpanAttrs where
   mempty = SpanAttrs Map.empty

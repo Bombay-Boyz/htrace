@@ -109,12 +109,12 @@ memoryExporter = do
 
   let doExport ne = do
         atomically $
-          modifyTVar' tvar (NE.toList ne <>)
+          modifyTVar' tvar (<> NE.toList ne)
 
         pure (ExportSuccess (NE.length ne))
 
       readAll =
-        fmap reverse (readTVarIO tvar)
+        (readTVarIO tvar)
 
   pure
     ( SpanExporter

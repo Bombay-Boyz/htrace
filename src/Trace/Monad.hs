@@ -96,11 +96,12 @@ setSpanAttr sp k v = modifySpan sp $ \si ->
          SpanAttrs (Map.insert k v (unSpanAttrs (siAttributes si))) }
 
 -- | Merge a list of attributes into a live span.
--- Right-biased: new values override existing ones for the same key.
+-- New values override existing ones: @attrs kvs@ is the left operand
+-- and wins under the left-biased 'Semigroup' instance.
 setSpanAttrs
   :: Span -> [(AttrKey, AttrValue)] -> IO (Either SpanError ())
 setSpanAttrs sp kvs = modifySpan sp $ \si ->
-  si { siAttributes = siAttributes si <> attrs kvs }
+  si { siAttributes = attrs kvs <> siAttributes si }
 
 -- | Set the status of a live span.
 setSpanStatus :: Span -> SpanStatus -> IO (Either SpanError ())

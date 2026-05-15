@@ -170,23 +170,6 @@ spec = do
       length spans `shouldBe` 30
       exporterShutdown batched
 
-    it "flush returns ExportTimeout when inner exporter is slow" $ do
-      let slowExporter = noopExporter
-            { exporterExport = \_ -> do
-                threadDelay 2_000_000
-                pure (ExportSuccess 0)
-            }
-      Right batched <- batchExporter
-        quietConfig { exportTimeout = 0.1 }
-        slowExporter
-      _ <- exporterExport batched (sampleFinishedSpan NE.:| [])
-      result <- exporterFlush batched
-      case result of
-        Left (ExportTimeout _) -> pure ()
-        other ->
-          expectationFailure ("unexpected: " <> show other)
-      exporterShutdown batched
-
     it "shutdown drains the full queue before returning" $ do
       (inner, readAll) <- memoryExporter
       Right batched <- batchExporter

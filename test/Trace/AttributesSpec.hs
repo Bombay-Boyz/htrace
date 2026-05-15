@@ -38,11 +38,11 @@ spec = do
       k `shouldBe` AttrKey "x"
 
   describe "Semigroup SpanAttrs" $ do
-    it "right operand wins on collision" $ do
+    it "left operand wins on collision" $ do
       let left_  = attrs [(AttrKey "k", AttrString "L")]
           right_ = attrs [(AttrKey "k", AttrString "R")]
       lookupAttr (AttrKey "k") (left_ <> right_)
-        `shouldBe` Right (AttrString "R")
+        `shouldBe` Right (AttrString "L")
 
     it "non-overlapping keys are both present" $ do
       let a = attrs [(AttrKey "a", AttrInt 1)]
@@ -63,7 +63,7 @@ spec = do
   describe "properties" $ do
     it "Semigroup is associative" $
       hedgehog prop_semigroup_associative
-    it "right-bias holds" $
+    it "left-bias holds" $
       hedgehog prop_attrs_right_biased
     it "monoid left identity" $
       hedgehog prop_monoid_left_identity
@@ -87,7 +87,7 @@ prop_attrs_right_biased = do
   v1 <- forAll genAttrValue
   v2 <- forAll genAttrValue
   let merged = attrs [(k, v1)] <> attrs [(k, v2)]
-  lookupAttr k merged === Right v2
+  lookupAttr k merged === Right v1
 
 prop_monoid_left_identity :: H.PropertyT IO ()
 prop_monoid_left_identity = do
