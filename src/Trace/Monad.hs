@@ -255,6 +255,9 @@ flush = exporterFlush . tracerExporter
 -- and guarantee the exporter is flushed and shut down on exit —
 -- whether the action returns normally or throws.
 --
+-- Batch processor settings are taken from 'configBatch', which is populated
+-- from @OTEL_BSP_*@ environment variables when using 'fromEnv'.
+--
 -- The flush before shutdown ensures all buffered spans are handed to the
 -- inner exporter before teardown begins (M-7).
 --
@@ -271,7 +274,9 @@ withTracing cfg action = do
   case innerR of
     Left e     -> pure (Left e)
     Right inner -> do
-      let batchCfg = defaultBatchConfig
+      -- Use configBatch so OTEL_BSP_* env vars are honoured when the
+      -- caller obtained their TracingConfig via fromEnv.
+      let batchCfg = (configBatch cfg)
             { onDroppedSpans = defaultOnDroppedSpans (configLogger cfg)
             , batchLogger    = configLogger cfg
             }

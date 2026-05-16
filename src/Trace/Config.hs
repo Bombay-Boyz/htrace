@@ -23,14 +23,16 @@ module Trace.Config
   , fromEnv
   ) where
 
-import Data.List.NonEmpty (NonEmpty (..))
+import Data.List.NonEmpty (NonEmpty (..), (<|))
 import Data.List.NonEmpty qualified as NE
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Read qualified as TR
+import Data.Time (NominalDiffTime)
 import System.Environment (lookupEnv)
 
 import Trace.Attributes
+import Trace.Export.Batch (BatchConfig (..), defaultBatchConfig)
 import Trace.Export.Otlp
 import Trace.Export.Types
 
@@ -167,6 +169,9 @@ data TracingConfig = TracingConfig
   , configResource    :: !Resource
   , configPropagators :: ![Propagator]
   , configLogger      :: !InternalLogger
+  , configBatch       :: !BatchConfig
+    -- ^ Batch processor settings.  Loaded from @OTEL_BSP_*@ env vars by
+    -- 'fromEnv'; defaults to 'defaultBatchConfig' otherwise.
   }
 
 instance Show TracingConfig where
@@ -178,7 +183,7 @@ instance Show TracingConfig where
     <> ", logger = <function> }"
 
 -- | Two 'TracingConfig' values are equal when all fields except
--- 'configLogger' are equal (functions cannot be compared).
+-- 'configLogger' and 'configBatch' are equal (functions cannot be compared).
 instance Eq TracingConfig where
   a == b =
     configExporter    a == configExporter    b
@@ -194,6 +199,7 @@ defaultConfig = TracingConfig
   , configResource    = defaultResource
   , configPropagators = [W3CTraceContextPropagator]
   , configLogger      = stderrLogger
+  , configBatch       = defaultBatchConfig
   }
 
 -- ---------------------------------------------------------------------------
@@ -203,6 +209,13 @@ defaultConfig = TracingConfig
 -- | Load 'TracingConfig' from @OTEL_*@ environment variables.
 -- Accumulates all errors rather than short-circuiting on the first one.
 -- Honours @OTEL_SDK_DISABLED=true@ as a kill-switch.
+--
+-- Reads the following @OTEL_BSP_*@ variables for the batch processor:
+--
+-- * @OTEL_BSP_MAX_QUEUE_SIZE@        — default 2048
+-- * @OTEL_BSP_MAX_EXPORT_BATCH_SIZE@ — default 512
+-- * @OTEL_BSP_SCHEDULE_DELAY@        — export interval in milliseconds, default 5000
+-- * @OTEL_BSP_EXPORT_TIMEOUT@        — export timeout in milliseconds, default 30000
 fromEnv :: IO (Either (NonEmpty ConfigError) TracingConfig)
 fromEnv = do
   disabled <- lookupEnv "OTEL_SDK_DISABLED"
@@ -213,6 +226,7 @@ fromEnv = do
       vExp   <- loadExporterConfig
       vSamp  <- loadSamplerConfig
       vRes   <- loadResource
+      vBatch <- loadBatchConfig
       pure $ validationToEither $
         TracingConfig
           <$> vExp
@@ -220,6 +234,90 @@ fromEnv = do
           <*> vRes
           <*> pure [W3CTraceContextPropagator]
           <*> pure stderrLogger
+          <*> vBatch
+
+-- ---------------------------------------------------------------------------
+-- Batch processor loader
+-- ---------------------------------------------------------------------------
+
+-- | Read @OTEL_BSP_*@ environment variables and produce a 'BatchConfig'.
+-- Any variable that is absent falls back to the corresponding field of
+-- 'defaultBatchConfig'.  Values that are present but invalid are collected
+-- as errors.
+loadBatchConfig
+  :: IO (Validation (NonEmpty ConfigError) BatchConfig)
+loadBatchConfig = do
+  queueVar <- lookupEnv "OTEL_BSP_MAX_QUEUE_SIZE"
+  batchVar <- lookupEnv "OTEL_BSP_MAX_EXPORT_BATCH_SIZE"
+  delayVar <- lookupEnv "OTEL_BSP_SCHEDULE_DELAY"
+  timeVar  <- lookupEnv "OTEL_BSP_EXPORT_TIMEOUT"
+
+  let vQueue = case queueVar of
+        Nothing -> Success (maxQueueSize defaultBatchConfig)
+        Just s  -> case parsePositiveInt s of
+          Just n  -> Success n
+          Nothing -> Failure $ NE.singleton $
+            InvalidVarValue
+              (EnvVarName "OTEL_BSP_MAX_QUEUE_SIZE")
+              (Text.pack s)
+              "expected a positive integer"
+
+      vBatchSize = case batchVar of
+        Nothing -> Success (maxExportBatch defaultBatchConfig)
+        Just s  -> case parsePositiveInt s of
+          Just n  -> Success n
+          Nothing -> Failure $ NE.singleton $
+            InvalidVarValue
+              (EnvVarName "OTEL_BSP_MAX_EXPORT_BATCH_SIZE")
+              (Text.pack s)
+              "expected a positive integer"
+
+      -- OTEL_BSP_SCHEDULE_DELAY is in milliseconds.
+      vInterval = case delayVar of
+        Nothing -> Success (exportInterval defaultBatchConfig)
+        Just s  -> case parsePositiveDouble s of
+          Just ms -> Success (realToFrac (ms / 1000 :: Double) :: NominalDiffTime)
+          Nothing -> Failure $ NE.singleton $
+            InvalidVarValue
+              (EnvVarName "OTEL_BSP_SCHEDULE_DELAY")
+              (Text.pack s)
+              "expected a positive number of milliseconds"
+
+      -- OTEL_BSP_EXPORT_TIMEOUT is in milliseconds.
+      vTimeout = case timeVar of
+        Nothing -> Success (exportTimeout defaultBatchConfig)
+        Just s  -> case parsePositiveDouble s of
+          Just ms -> Success (realToFrac (ms / 1000 :: Double) :: NominalDiffTime)
+          Nothing -> Failure $ NE.singleton $
+            InvalidVarValue
+              (EnvVarName "OTEL_BSP_EXPORT_TIMEOUT")
+              (Text.pack s)
+              "expected a positive number of milliseconds"
+
+  -- Validate that batch size does not exceed queue size after both are known.
+  pure $ assembleBatch <$> vQueue <*> vBatchSize <*> vInterval <*> vTimeout
+  where
+    assembleBatch q b i t =
+      -- Clamp batch size to queue size if the user supplied both and the
+      -- batch size exceeds the queue; BatchConfig validation in batchExporter
+      -- will still catch this as a hard error, but we produce a sensible
+      -- value here so fromEnv itself succeeds.
+      defaultBatchConfig
+        { maxQueueSize   = q
+        , maxExportBatch = min b q
+        , exportInterval = i
+        , exportTimeout  = t
+        }
+
+    parsePositiveInt :: String -> Maybe Int
+    parsePositiveInt s = case TR.decimal (Text.pack s) of
+      Right (n, rest) | Text.null rest && n > 0 -> Just n
+      _                                          -> Nothing
+
+    parsePositiveDouble :: String -> Maybe Double
+    parsePositiveDouble s = case TR.double (Text.pack s) of
+      Right (d, rest) | Text.null rest && d > 0 -> Just d
+      _                                          -> Nothing
 
 -- ---------------------------------------------------------------------------
 -- Exporter loader
