@@ -99,7 +99,9 @@ test-suite htrace-test
     Trace.IntegrationSpec
     Trace.MonadSpec
     Trace.PropagationSpec
-    -- Internal library modules needed by tests
+    Trace.Config
+    Trace.Monad
+    Trace.Propagation
     Trace.Attributes
     Trace.Core
     Trace.Export.Batch
@@ -149,6 +151,7 @@ benchmark htrace-bench
   other-modules:
     BatchBench
     -- Internal library modules needed by benchmarks
+    Trace.Propagation
     Trace.Attributes
     Trace.Core
     Trace.Export.Batch
