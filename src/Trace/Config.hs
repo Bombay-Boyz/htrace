@@ -21,9 +21,10 @@ module Trace.Config
   , EnvVarName (..)
     -- * Environment loader
   , fromEnv
+  , fromEnvWithStderr
   ) where
 
-import Data.List.NonEmpty (NonEmpty (..), (<|))
+import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -206,7 +207,8 @@ defaultConfig = TracingConfig
 -- Environment loader
 -- ---------------------------------------------------------------------------
 
--- | Load 'TracingConfig' from @OTEL_*@ environment variables.
+-- | Load 'TracingConfig' from @OTEL_*@ environment variables, using the
+-- supplied 'InternalLogger' for the resulting config (L-4).
 -- Accumulates all errors rather than short-circuiting on the first one.
 -- Honours @OTEL_SDK_DISABLED=true@ as a kill-switch.
 --
@@ -216,12 +218,17 @@ defaultConfig = TracingConfig
 -- * @OTEL_BSP_MAX_EXPORT_BATCH_SIZE@ — default 512
 -- * @OTEL_BSP_SCHEDULE_DELAY@        — export interval in milliseconds, default 5000
 -- * @OTEL_BSP_EXPORT_TIMEOUT@        — export timeout in milliseconds, default 30000
-fromEnv :: IO (Either (NonEmpty ConfigError) TracingConfig)
-fromEnv = do
+fromEnv
+  :: InternalLogger
+  -> IO (Either (NonEmpty ConfigError) TracingConfig)
+fromEnv logger = do
   disabled <- lookupEnv "OTEL_SDK_DISABLED"
   case disabled of
     Just s | Text.toLower (Text.pack s) == "true" ->
-      pure (Right (defaultConfig { configExporter = NoopExporter }))
+      pure (Right (defaultConfig
+        { configExporter = NoopExporter
+        , configLogger   = logger
+        }))
     _ -> do
       vExp   <- loadExporterConfig
       vSamp  <- loadSamplerConfig
@@ -233,8 +240,13 @@ fromEnv = do
           <*> vSamp
           <*> vRes
           <*> pure [W3CTraceContextPropagator]
-          <*> pure stderrLogger
+          <*> pure logger
           <*> vBatch
+
+-- | Convenience wrapper around 'fromEnv' that uses 'stderrLogger'.
+-- Equivalent to @fromEnv stderrLogger@.
+fromEnvWithStderr :: IO (Either (NonEmpty ConfigError) TracingConfig)
+fromEnvWithStderr = fromEnv stderrLogger
 
 -- ---------------------------------------------------------------------------
 -- Batch processor loader
@@ -294,7 +306,6 @@ loadBatchConfig = do
               (Text.pack s)
               "expected a positive number of milliseconds"
 
-  -- Validate that batch size does not exceed queue size after both are known.
   pure $ assembleBatch <$> vQueue <*> vBatchSize <*> vInterval <*> vTimeout
   where
     assembleBatch q b i t =

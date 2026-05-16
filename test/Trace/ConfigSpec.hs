@@ -53,14 +53,14 @@ spec = around_ withCleanEnv $ do
     describe "OTEL_SDK_DISABLED" $ do
       it "returns defaultConfig with NoopExporter when set to 'true'" $ do
         withEnvVars [("OTEL_SDK_DISABLED", "true")] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Right cfg -> configExporter cfg `shouldBe` NoopExporter
             Left errs -> expectationFailure (show errs)
 
       it "disables when set to 'TRUE' (case-insensitive match)" $ do
         withEnvVars [("OTEL_SDK_DISABLED", "TRUE")] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Right cfg -> configExporter cfg `shouldBe` NoopExporter
             Left errs -> expectationFailure (show errs)
@@ -70,7 +70,7 @@ spec = around_ withCleanEnv $ do
           [ ("OTEL_SDK_DISABLED",    "1")
           , ("OTEL_TRACES_EXPORTER", "none")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Right cfg -> configExporter cfg `shouldBe` NoopExporter
             Left errs -> expectationFailure (show errs)
@@ -78,14 +78,14 @@ spec = around_ withCleanEnv $ do
     describe "OTEL_TRACES_EXPORTER" $ do
       it "returns NoopExporter when set to 'none'" $ do
         withEnvVars [("OTEL_TRACES_EXPORTER", "none")] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Right cfg -> configExporter cfg `shouldBe` NoopExporter
             Left errs -> expectationFailure (show errs)
 
       it "returns error for unknown exporter type" $ do
         withEnvVars [("OTEL_TRACES_EXPORTER", "zipkin")] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Left errs ->
               any isInvalidVarValue (NE.toList errs) `shouldBe` True
@@ -98,7 +98,7 @@ spec = around_ withCleanEnv $ do
           [ ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
           , ("OTEL_SERVICE_NAME",           "svc")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Right cfg -> case configExporter cfg of
               OtlpExporter _ -> pure ()
@@ -108,7 +108,7 @@ spec = around_ withCleanEnv $ do
 
       it "returns MissingRequiredVar when OTLP endpoint is absent" $ do
         withEnvVars [("OTEL_TRACES_EXPORTER", "otlp")] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Left errs ->
               any isMissingVar (NE.toList errs) `shouldBe` True
@@ -120,7 +120,7 @@ spec = around_ withCleanEnv $ do
           [ ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
           , ("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Left errs ->
               any isUnsupportedProtocol (NE.toList errs) `shouldBe` True
@@ -132,7 +132,7 @@ spec = around_ withCleanEnv $ do
           [ ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
           , ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Right cfg -> case configExporter cfg of
               OtlpExporter _ -> pure ()
@@ -146,7 +146,7 @@ spec = around_ withCleanEnv $ do
           [ ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
           , ("OTEL_EXPORTER_OTLP_TIMEOUT",  "-1")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Left errs ->
               any isInvalidVarValue (NE.toList errs) `shouldBe` True
@@ -158,7 +158,7 @@ spec = around_ withCleanEnv $ do
           [ ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
           , ("OTEL_EXPORTER_OTLP_TIMEOUT",  "abc")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Left errs ->
               any isInvalidVarValue (NE.toList errs) `shouldBe` True
@@ -168,7 +168,7 @@ spec = around_ withCleanEnv $ do
     describe "OTEL_TRACES_SAMPLER" $ do
       it "defaults to AlwaysSample when unset" $ do
         withEnvVars [("OTEL_TRACES_EXPORTER", "none")] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Right cfg -> configSampler cfg `shouldBe` AlwaysSample
             Left errs -> expectationFailure (show errs)
@@ -178,7 +178,7 @@ spec = around_ withCleanEnv $ do
           [ ("OTEL_TRACES_EXPORTER", "none")
           , ("OTEL_TRACES_SAMPLER",  "always_on")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Right cfg -> configSampler cfg `shouldBe` AlwaysSample
             Left errs -> expectationFailure (show errs)
@@ -188,7 +188,7 @@ spec = around_ withCleanEnv $ do
           [ ("OTEL_TRACES_EXPORTER", "none")
           , ("OTEL_TRACES_SAMPLER",  "always_off")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Right cfg -> configSampler cfg `shouldBe` NeverSample
             Left errs -> expectationFailure (show errs)
@@ -199,7 +199,7 @@ spec = around_ withCleanEnv $ do
           , ("OTEL_TRACES_SAMPLER",     "traceidratio")
           , ("OTEL_TRACES_SAMPLER_ARG", "0.5")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Right cfg -> case configSampler cfg of
               TraceIdRatio sr -> unSampleRate sr `shouldBe` 0.5
@@ -213,7 +213,7 @@ spec = around_ withCleanEnv $ do
           , ("OTEL_TRACES_SAMPLER",     "traceidratio")
           , ("OTEL_TRACES_SAMPLER_ARG", "1.5")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Left errs ->
               any isInvalidSampleRate (NE.toList errs) `shouldBe` True
@@ -225,7 +225,7 @@ spec = around_ withCleanEnv $ do
           [ ("OTEL_TRACES_EXPORTER", "none")
           , ("OTEL_TRACES_SAMPLER",  "traceidratio")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Left errs ->
               any isMissingVar (NE.toList errs) `shouldBe` True
@@ -237,7 +237,7 @@ spec = around_ withCleanEnv $ do
           [ ("OTEL_TRACES_EXPORTER", "none")
           , ("OTEL_TRACES_SAMPLER",  "random")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Left errs ->
               any isInvalidVarValue (NE.toList errs) `shouldBe` True
@@ -249,7 +249,7 @@ spec = around_ withCleanEnv $ do
           [ ("OTEL_TRACES_EXPORTER", "none")
           , ("OTEL_TRACES_SAMPLER",  "parentbased_always_on")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Right cfg -> configSampler cfg `shouldBe` ParentBased AlwaysSample
             Left errs -> expectationFailure (show errs)
@@ -259,7 +259,7 @@ spec = around_ withCleanEnv $ do
           [ ("OTEL_TRACES_EXPORTER", "none")
           , ("OTEL_TRACES_SAMPLER",  "parentbased_always_off")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Right cfg -> configSampler cfg `shouldBe` ParentBased NeverSample
             Left errs -> expectationFailure (show errs)
@@ -270,7 +270,7 @@ spec = around_ withCleanEnv $ do
           , ("OTEL_TRACES_SAMPLER",     "parentbased_traceidratio")
           , ("OTEL_TRACES_SAMPLER_ARG", "0.25")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Right cfg ->
               case configSampler cfg of
@@ -283,7 +283,7 @@ spec = around_ withCleanEnv $ do
           [ ("OTEL_TRACES_EXPORTER", "none")
           , ("OTEL_TRACES_SAMPLER",  "parentbased_traceidratio")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Left errs ->
               any isMissingVar (NE.toList errs) `shouldBe` True
@@ -296,7 +296,7 @@ spec = around_ withCleanEnv $ do
           , ("OTEL_TRACES_SAMPLER",     "traceidratio")
           , ("OTEL_TRACES_SAMPLER_ARG", "abc")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Left errs ->
               any isInvalidVarValue (NE.toList errs) `shouldBe` True
@@ -309,7 +309,7 @@ spec = around_ withCleanEnv $ do
           , ("OTEL_TRACES_SAMPLER",     "traceidratio")
           , ("OTEL_TRACES_SAMPLER_ARG", "0")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Right cfg -> case configSampler cfg of
               TraceIdRatio sr -> unSampleRate sr `shouldBe` 0.0
@@ -322,7 +322,7 @@ spec = around_ withCleanEnv $ do
           [ ("OTEL_TRACES_EXPORTER", "none")
           , ("OTEL_SERVICE_NAME",    "my-service")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Right cfg ->
               lookupAttr (AttrKey "service.name")
@@ -335,7 +335,7 @@ spec = around_ withCleanEnv $ do
           [ ("OTEL_TRACES_EXPORTER", "none")
           , ("OTEL_SERVICE_NAME",    "   ")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Left errs ->
               any isInvalidVarValue (NE.toList errs) `shouldBe` True
@@ -349,7 +349,7 @@ spec = around_ withCleanEnv $ do
           , ("OTEL_SERVICE_NAME",        "svc")
           , ("OTEL_RESOURCE_ATTRIBUTES", "env=prod,region=us-east-1")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Right cfg -> do
               lookupAttr (AttrKey "env")
@@ -366,7 +366,7 @@ spec = around_ withCleanEnv $ do
           , ("OTEL_SERVICE_NAME",        "svc")
           , ("OTEL_RESOURCE_ATTRIBUTES", "badentry")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Left errs ->
               any isInvalidResourceAttr (NE.toList errs) `shouldBe` True
@@ -379,7 +379,7 @@ spec = around_ withCleanEnv $ do
           , ("OTEL_SERVICE_NAME",        "svc")
           , ("OTEL_RESOURCE_ATTRIBUTES", "")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Right _ -> pure ()
             Left errs -> expectationFailure (show errs)
@@ -391,7 +391,7 @@ spec = around_ withCleanEnv $ do
           , ("OTEL_TRACES_SAMPLER",     "traceidratio")
           , ("OTEL_TRACES_SAMPLER_ARG", "1.5")
           ] $ do
-          result <- fromEnv
+          result <- fromEnvWithStderr
           case result of
             Left errs -> NE.length errs `shouldSatisfy` (>= 2)
             Right _   -> expectationFailure "expected Left"
