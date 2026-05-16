@@ -134,12 +134,15 @@ extractContext hs =
 -- ---------------------------------------------------------------------------
 
 -- | Decode exactly @expectedBytes@ bytes from a hex-encoded 'Text'.
+-- Normalises to lowercase before decoding so that uppercase hex digits
+-- (valid per W3C Trace Context §4.3 forward-compatibility rules) are
+-- accepted without error (M-6).
 decodeHex :: Int -> Text -> Either Text ByteString
 decodeHex expectedBytes t
   | Text.length t /= expectedBytes * 2 =
       Left ("expected " <> Text.pack (show (expectedBytes * 2)) <> " hex chars")
   | otherwise =
-      case Base16.decode (TE.encodeUtf8 t) of
+      case Base16.decode (TE.encodeUtf8 (Text.toLower t)) of
         Right bs -> Right bs
         Left  e  -> Left (Text.pack e)
 

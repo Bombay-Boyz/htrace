@@ -4,13 +4,17 @@ module Trace.Export.Otlp
   , unEndpoint
   , mkEndpoint
     -- * Configuration
-  , Compression (..)
+    -- | Note: only 'NoCompression' is currently supported.
+    -- 'GzipCompression' is defined but not exported; it will be added
+    -- to the public API once implemented.
+  , Compression (NoCompression)
   , OtlpConfig (..)
     -- * Constructor
   , otlpExporter
     -- * OTLP encoding (exposed for testing)
   , encodeOtlp
   ) where
+
 import Data.ByteString (ByteString)
 import Data.Aeson (Value (..), encode, object, (.=))
 import Data.ByteString.Base16 qualified as Base16
@@ -41,7 +45,7 @@ import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types (statusCode)
 import Network.URI qualified as URI
 import UnliftIO.Exception (SomeException, try)
-import Data.ByteString.Base16 qualified as Base16
+
 import Trace.Attributes
 import Trace.Core
 import Trace.Export.Types
@@ -72,11 +76,14 @@ mkEndpoint t =
 -- ---------------------------------------------------------------------------
 
 -- | Whether to compress the request body.
--- 'GzipCompression' is not yet implemented; 'otlpExporter' returns
--- 'Left' 'ExporterUnsupportedCompression' if it is requested.
+--
+-- Currently only 'NoCompression' is supported and exported.
+-- 'GzipCompression' exists internally for future use but is intentionally
+-- not exported: exporting an unimplemented constructor would allow
+-- type-correct code that always fails at runtime (M-3).
 data Compression
   = NoCompression
-  | GzipCompression
+  | GzipCompression   -- not exported; see module header
   deriving stock (Show, Eq)
 
 -- | Configuration for the OTLP/HTTP JSON exporter.

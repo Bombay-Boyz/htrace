@@ -255,6 +255,9 @@ flush = exporterFlush . tracerExporter
 -- and guarantee the exporter is flushed and shut down on exit —
 -- whether the action returns normally or throws.
 --
+-- The flush before shutdown ensures all buffered spans are handed to the
+-- inner exporter before teardown begins (M-7).
+--
 -- Returns 'Left' if the exporter or batcher could not be initialised.
 withTracing
   :: TracingConfig
@@ -289,7 +292,11 @@ withTracing cfg action = do
           fmap Right $
             bracket
               (pure ())
-              (\_ -> exporterShutdown batched)
+              (\_ -> do
+                  -- Flush first so all buffered spans reach the inner
+                  -- exporter before we tear it down (M-7).
+                  _ <- exporterFlush batched
+                  exporterShutdown batched)
               (\_ -> action tracer)
 
 -- | Convert a 'SamplerConfig' to a 'Sampler'.
