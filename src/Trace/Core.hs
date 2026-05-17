@@ -189,11 +189,14 @@ mkSpanName t
   | Text.null (Text.strip t) = Nothing
   | otherwise                = Just (SpanName t)
 
+-- NEW
 instance IsString SpanName where
   fromString s =
     case mkSpanName (Text.pack s) of
       Just n  -> n
-      Nothing -> SpanName "<unnamed-span>"
+      Nothing -> error
+        "SpanName.fromString: empty or whitespace-only span name.\
+        \ Use mkSpanName for a safe constructor."
 
 -- ---------------------------------------------------------------------------
 -- Span lifecycle

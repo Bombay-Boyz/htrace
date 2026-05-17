@@ -16,7 +16,14 @@ module Trace.Export.Otlp
   ) where
 
 import Data.ByteString (ByteString)
-import Data.Aeson (Value (..), encode, object, (.=))
+
+import Data.Aeson (Value (..), object, (.=))
+import Data.Aeson.Encoding
+  ( Encoding
+  , encodingToLazyByteString
+  , pairs, pair, list, text, integer, bool, double, null_
+  )
+import qualified Data.Aeson.Encoding as AE
 import Data.ByteString.Base16 qualified as Base16
 import Data.CaseInsensitive qualified as CI
 import Data.List.NonEmpty (NonEmpty)
@@ -177,8 +184,10 @@ doExport
   -> InstrumentationScope
   -> NonEmpty FinishedSpan
   -> IO ExportResult
+-- NEW
 doExport mgr req resourceAttrs scope spans = do
-  let body = encode (encodeOtlp resourceAttrs scope (NE.toList spans))
+  let body = encodingToLazyByteString
+               (encodeOtlpE resourceAttrs scope (NE.toList spans))
       req' = req { requestBody = RequestBodyLBS body }
   result <- try (httpLbs req' mgr)
   case result of
@@ -296,3 +305,96 @@ encodeStatus = \case
   StatusUnset    -> object ["code" .= (0 :: Int)]
   StatusOk       -> object ["code" .= (1 :: Int)]
   StatusError em -> object ["code" .= (2 :: Int), "message" .= unErrorMessage em]
+
+-- NEW — added after encodeStatus
+
+-- | Streaming encoder: same wire format as 'encodeOtlp' but avoids
+-- building an intermediate 'Value' AST.
+encodeOtlpE
+  :: SpanAttrs -> InstrumentationScope -> [FinishedSpan] -> Encoding
+encodeOtlpE resourceAttrs scope spans =
+  pairs (pair "resourceSpans" (list id [resourceSpanE]))
+  where
+    resourceSpanE =
+      pairs
+        (  pair "resource"   (encodeResourceE resourceAttrs)
+        <> pair "scopeSpans" (list id [scopeSpanE])
+        )
+    scopeSpanE =
+      pairs
+        (  pair "scope" (encodeScopeE scope)
+        <> pair "spans" (list encodeSpanE spans)
+        )
+
+encodeResourceE :: SpanAttrs -> Encoding
+encodeResourceE r =
+  pairs (pair "attributes"
+    (list encodeKvE (Map.toList (unSpanAttrs r))))
+
+encodeScopeE :: InstrumentationScope -> Encoding
+encodeScopeE s =
+  pairs
+    (  pair "name" (text (scopeName s))
+    <> maybe mempty (\v -> pair "version" (text v)) (scopeVersion s)
+    )
+
+encodeSpanE :: FinishedSpan -> Encoding
+encodeSpanE fs =
+  pairs
+    (  pair "traceId"           (text (hexText (unTraceId (scTraceId (fsContext fs)))))
+    <> pair "spanId"            (text (hexText (unSpanId  (scSpanId  (fsContext fs)))))
+    <> pair "parentSpanId"      (text (maybe "" (hexText . unSpanId)
+                                         (scParentId (fsContext fs))))
+    <> pair "name"              (text (unSpanName (fsName fs)))
+    <> pair "kind"              (integer (fromIntegral (encodeKind (fsKind fs))))
+    <> pair "startTimeUnixNano" (integer (toUnixNano (fsStartTime fs)))
+    <> pair "endTimeUnixNano"   (integer (toUnixNano (fsEndTime   fs)))
+    <> pair "attributes"        (list encodeKvE
+                                   (Map.toList (unSpanAttrs (fsAttributes fs))))
+    <> pair "events"            (list encodeEventE (fsEvents fs))
+    <> pair "status"            (encodeStatusE (fsStatus fs))
+    )
+  where
+    hexText bs = TE.decodeUtf8 (Base16.encode bs)
+    toUnixNano t =
+      floor (utcTimeToPOSIXSeconds t * 1_000_000_000) :: Integer
+
+encodeKvE :: (AttrKey, AttrValue) -> Encoding
+encodeKvE (AttrKey k, v) =
+  pairs
+    (  pair "key"   (text k)
+    <> pair "value" (encodeAttrValueE v)
+    )
+
+encodeAttrValueE :: AttrValue -> Encoding
+encodeAttrValueE = \case
+  AttrString t    -> pairs (pair "stringValue" (text t))
+  AttrInt n       -> pairs (pair "intValue"    (integer (fromIntegral n)))
+  AttrDouble d    -> pairs (pair "doubleValue" (double d))
+  AttrBool b      -> pairs (pair "boolValue"   (bool b))
+  AttrStringList ts ->
+    pairs (pair "arrayValue"
+      (pairs (pair "values"
+        (list (\t -> pairs (pair "stringValue" (text t))) ts))))
+  AttrIntList ns ->
+    pairs (pair "arrayValue"
+      (pairs (pair "values"
+        (list (\n -> pairs (pair "intValue" (integer (fromIntegral n)))) ns))))
+
+encodeEventE :: SpanEvent -> Encoding
+encodeEventE ev =
+  pairs
+    (  pair "name"         (text (eventName ev))
+    <> pair "timeUnixNano" (integer (toUnixNano (eventTime ev)))
+    <> pair "attributes"   (list encodeKvE
+                              (Map.toList (unSpanAttrs (eventAttributes ev))))
+    )
+  where
+    toUnixNano t =
+      floor (utcTimeToPOSIXSeconds t * 1_000_000_000) :: Integer
+
+encodeStatusE :: SpanStatus -> Encoding
+encodeStatusE = \case
+  StatusUnset    -> pairs (pair "code" (integer 0))
+  StatusOk       -> pairs (pair "code" (integer 1))
+  StatusError em -> pairs (pair "code" (integer 2) <> pair "message" (text (unErrorMessage em)))

@@ -11,6 +11,7 @@ import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Trace.Core
 import Trace.Generators
+import Control.Exception (evaluate)
 
 spec :: Spec
 spec = do
@@ -111,8 +112,10 @@ spec = do
     it "mkSpanName accepts emoji" $
       mkSpanName "🦀" `shouldBe` Just (SpanName "🦀")
 
-    it "IsString falls back to <unnamed-span> for empty string" $
-      ("" :: SpanName) `shouldBe` SpanName "<unnamed-span>"
+    
+    it "errors on empty string" $ do
+      evaluate ("" :: SpanName) `shouldThrow` errorCall
+       "SpanName.fromString: empty or whitespace-only span name. Use mkSpanName for a safe constructor."
 
     it "IsString accepts a non-empty string" $
       ("my-span" :: SpanName) `shouldBe` SpanName "my-span"

@@ -198,6 +198,7 @@ inSpanCore tracer parent name kind initialAttrs body = do
               , fsEvents     = reverse (siEvents si')
               }
           _ -> pure Nothing
+      -- NEW
       case (exportOnEnd, mFinished) of
         (True, Just fs) -> do
           result <- try (exporterExport (tracerExporter tracer) (fs NE.:| []))
@@ -206,8 +207,13 @@ inSpanCore tracer parent name kind initialAttrs body = do
               logError (tracerLogger tracer)
                 ("htrace: exporter threw during span finalisation: "
                   <> Text.pack (show e))
-            Right _ -> pure ()
-        _ -> pure ()
+            Right (ExportFailure err) ->
+              logWarn (tracerLogger tracer)
+                ("htrace: export failed during span finalisation: "
+                  <> Text.pack (show err))
+            Right (ExportSuccess _) ->
+              pure ()
+        _ -> pure ()  
 
 -- | Run an action inside a new root span (no parent context).
 inSpan

@@ -212,12 +212,14 @@ defaultConfig = TracingConfig
 -- Accumulates all errors rather than short-circuiting on the first one.
 -- Honours @OTEL_SDK_DISABLED=true@ as a kill-switch.
 --
+-- NEW
 -- Reads the following @OTEL_BSP_*@ variables for the batch processor:
 --
 -- * @OTEL_BSP_MAX_QUEUE_SIZE@        — default 2048
 -- * @OTEL_BSP_MAX_EXPORT_BATCH_SIZE@ — default 512
 -- * @OTEL_BSP_SCHEDULE_DELAY@        — export interval in milliseconds, default 5000
 -- * @OTEL_BSP_EXPORT_TIMEOUT@        — export timeout in milliseconds, default 30000
+-- * @OTEL_BSP_SHUTDOWN_TIMEOUT@      — shutdown grace period in milliseconds, default 5000
 fromEnv
   :: InternalLogger
   -> IO (Either (NonEmpty ConfigError) TracingConfig)
@@ -258,11 +260,13 @@ fromEnvWithStderr = fromEnv stderrLogger
 -- as errors.
 loadBatchConfig
   :: IO (Validation (NonEmpty ConfigError) BatchConfig)
+-- NEW
 loadBatchConfig = do
-  queueVar <- lookupEnv "OTEL_BSP_MAX_QUEUE_SIZE"
-  batchVar <- lookupEnv "OTEL_BSP_MAX_EXPORT_BATCH_SIZE"
-  delayVar <- lookupEnv "OTEL_BSP_SCHEDULE_DELAY"
-  timeVar  <- lookupEnv "OTEL_BSP_EXPORT_TIMEOUT"
+  queueVar    <- lookupEnv "OTEL_BSP_MAX_QUEUE_SIZE"
+  batchVar    <- lookupEnv "OTEL_BSP_MAX_EXPORT_BATCH_SIZE"
+  delayVar    <- lookupEnv "OTEL_BSP_SCHEDULE_DELAY"
+  timeVar     <- lookupEnv "OTEL_BSP_EXPORT_TIMEOUT"
+  shutdownVar <- lookupEnv "OTEL_BSP_SHUTDOWN_TIMEOUT"
 
   let vQueue = case queueVar of
         Nothing -> Success (maxQueueSize defaultBatchConfig)
@@ -306,18 +310,28 @@ loadBatchConfig = do
               (Text.pack s)
               "expected a positive number of milliseconds"
 
-  pure $ assembleBatch <$> vQueue <*> vBatchSize <*> vInterval <*> vTimeout
+  -- NEW  (insert before the pure $ line)
+      -- OTEL_BSP_SHUTDOWN_TIMEOUT is in milliseconds.
+      vShutdown = case shutdownVar of
+        Nothing -> Success (shutdownTimeout defaultBatchConfig)
+        Just s  -> case parsePositiveDouble s of
+          Just ms -> Success (realToFrac (ms / 1000 :: Double) :: NominalDiffTime)
+          Nothing -> Failure $ NE.singleton $
+            InvalidVarValue
+              (EnvVarName "OTEL_BSP_SHUTDOWN_TIMEOUT")
+              (Text.pack s)
+              "expected a positive number of milliseconds"
+
+  pure $ assembleBatch <$> vQueue <*> vBatchSize <*> vInterval <*> vTimeout <*> vShutdown
   where
-    assembleBatch q b i t =
-      -- Clamp batch size to queue size if the user supplied both and the
-      -- batch size exceeds the queue; BatchConfig validation in batchExporter
-      -- will still catch this as a hard error, but we produce a sensible
-      -- value here so fromEnv itself succeeds.
+    -- NEW
+    assembleBatch q b i t s =
       defaultBatchConfig
-        { maxQueueSize   = q
-        , maxExportBatch = min b q
-        , exportInterval = i
-        , exportTimeout  = t
+        { maxQueueSize    = q
+        , maxExportBatch  = min b q
+        , exportInterval  = i
+        , exportTimeout   = t
+        , shutdownTimeout = s
         }
 
     parsePositiveInt :: String -> Maybe Int

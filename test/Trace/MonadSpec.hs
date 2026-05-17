@@ -14,6 +14,7 @@ import Trace.Core
 import Trace.Export.Types
 import Trace.Monad
 import Trace.Generators
+import Control.Exception (evaluate)
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -299,11 +300,14 @@ spec = do
     it "mkSpanName accepts non-blank text" $
       mkSpanName "checkout" `shouldBe` Just (SpanName "checkout")
 
-    it "IsString instance falls back for empty string literal" $
-      unSpanName ("" :: SpanName) `shouldBe` "<unnamed-span>"
+        -- NEW
+    it "IsString instance errors on empty string literal" $ do
+      evaluate ("" :: SpanName) `shouldThrow` errorCall
+        "SpanName.fromString: empty or whitespace-only span name. Use mkSpanName for a safe constructor."
 
-    it "IsString instance falls back for whitespace-only literal" $
-      unSpanName ("   " :: SpanName) `shouldBe` "<unnamed-span>"
+    it "IsString instance errors on whitespace-only literal" $ do
+      evaluate ("   " :: SpanName) `shouldThrow` errorCall
+        "SpanName.fromString: empty or whitespace-only span name. Use mkSpanName for a safe constructor."
 
 -- ---------------------------------------------------------------------------
 -- Properties
