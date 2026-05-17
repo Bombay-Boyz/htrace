@@ -8,6 +8,7 @@ module Trace.Export.Types
   , mkHttpStatus
   , ExporterInitError (..)
   , BatchConfigError (..)
+  , OverflowStrategy (..)
     -- * Concrete exporters
   , noopExporter
   , memoryExporter
@@ -15,6 +16,7 @@ module Trace.Export.Types
   , InternalLogger (..)
   , stderrLogger
   , silentLogger
+  , NetworkFailure(..)
   ) where
 
 import Data.List.NonEmpty (NonEmpty)
@@ -51,8 +53,17 @@ data ExportResult
   | ExportFailure !ExportError
   deriving stock (Show, Eq)
 
+-- NEW
+data NetworkFailure
+  = ConnectionRefused
+  | DnsResolutionFailed
+  | TlsHandshakeFailed
+  | RequestTimedOut
+  | OtherNetworkError
+  deriving stock (Show, Eq)
+
 data ExportError
-  = EndpointUnreachable !Text
+  = NetworkError        !NetworkFailure !Text
   | MalformedResponse   !HttpStatus !Text
   | ExportTimeout       !NominalDiffTime
   | SerializationFailed !Text
@@ -91,6 +102,13 @@ data BatchConfigError
   | NonPositiveTimeout   !NominalDiffTime
   | NonPositiveShutdownTimeout !NominalDiffTime
   deriving stock (Show, Eq)
+
+
+data OverflowStrategy
+  = DropNewest    -- ^ discard incoming spans when queue is full (default)
+  | DropOldest    -- ^ evict oldest buffered spans to admit new ones
+  | BlockProducer -- ^ block the caller until space is available
+  deriving stock (Show, Eq, Enum, Bounded)
 
 -- ---------------------------------------------------------------------------
 -- Concrete exporters

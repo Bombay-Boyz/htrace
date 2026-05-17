@@ -231,7 +231,7 @@ spec = do
         testScope
       result <- exporterExport exporter (sampleFinishedSpan NE.:| [])
       case result of
-        ExportFailure (EndpointUnreachable _) -> pure ()
+        ExportFailure (NetworkError _ _) -> pure ()
         other -> expectationFailure ("unexpected: " <> show other)
 
     it "returns ExportFailure on non-2xx response" $ do

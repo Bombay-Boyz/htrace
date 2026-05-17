@@ -364,11 +364,13 @@ loadExporterConfig = do
 
 loadOtlpConfig
   :: IO (Validation (NonEmpty ConfigError) ExporterConfig)
+
 loadOtlpConfig = do
-  endpointVar <- lookupEnv "OTEL_EXPORTER_OTLP_ENDPOINT"
-  protoVar    <- lookupEnv "OTEL_EXPORTER_OTLP_PROTOCOL"
-  hdrsVar     <- lookupEnv "OTEL_EXPORTER_OTLP_HEADERS"
-  timeoutVar  <- lookupEnv "OTEL_EXPORTER_OTLP_TIMEOUT"
+  endpointVar    <- lookupEnv "OTEL_EXPORTER_OTLP_ENDPOINT"
+  protoVar       <- lookupEnv "OTEL_EXPORTER_OTLP_PROTOCOL"
+  hdrsVar        <- lookupEnv "OTEL_EXPORTER_OTLP_HEADERS"
+  timeoutVar     <- lookupEnv "OTEL_EXPORTER_OTLP_TIMEOUT"
+  compressionVar <- lookupEnv "OTEL_EXPORTER_OTLP_COMPRESSION"
   let vEndpoint = case endpointVar of
         Nothing -> Failure $ NE.singleton $
           MissingRequiredVar (EnvVarName "OTEL_EXPORTER_OTLP_ENDPOINT")
@@ -401,13 +403,29 @@ loadOtlpConfig = do
               (EnvVarName "OTEL_EXPORTER_OTLP_TIMEOUT")
               (Text.pack s)
               "expected a positive number of seconds"
+      
+      
+      vCompression = case compressionVar of
+        Nothing     -> Success ()
+        Just "none" -> Success ()
+        Just "gzip" -> Failure $ NE.singleton $
+          UnsupportedOtlpProtocol
+            "gzip compression is not yet implemented; use 'none'"
+        Just other  -> Failure $ NE.singleton $
+          InvalidVarValue
+            (EnvVarName "OTEL_EXPORTER_OTLP_COMPRESSION")
+            (Text.pack other)
+            "expected 'none' or 'gzip'"
 
       assemble ep hdrs to =
         OtlpExporter (OtlpConfig ep hdrs to NoCompression)
 
+      
+
   -- vProto contributes only errors; use (<* vProto) to require it to
   -- succeed without carrying its value forward.
-  pure $ (assemble <$> vEndpoint <*> vHeaders <*> vTimeout) <* vProto
+  
+  pure $ (assemble <$> vEndpoint <*> vHeaders <*> vTimeout) <* vProto <* vCompression
 
 -- | Parse @"k1=v1,k2=v2"@ into a list of header pairs.
 parseHeaderList

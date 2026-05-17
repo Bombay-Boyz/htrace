@@ -16,7 +16,7 @@ module Trace.Export.Otlp
   ) where
 
 import Data.ByteString (ByteString)
-
+import Control.Exception (fromException)
 import Data.Aeson (Value (..), object, (.=))
 import Data.Aeson.Encoding
   ( Encoding
@@ -35,7 +35,9 @@ import Data.Text.Encoding qualified as TE
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Time (NominalDiffTime)
 import Network.HTTP.Client
-  ( Manager
+  ( HttpException (..)
+  , HttpExceptionContent (..)
+  , Manager
   , Request
   , RequestBody (..)
   , httpLbs
@@ -173,6 +175,22 @@ validateHeaders = traverse validateOne
           Left (ExporterInvalidHeader k "contains invalid characters")
     validNameChar c = c > ' ' && c /= ':'
 
+-- | Map an HTTP exception to a structured 'NetworkFailure' category.
+classifyException :: SomeException -> NetworkFailure
+classifyException e =
+  case fromException e of
+    Just (HttpExceptionRequest _ content) ->
+      case content of
+        ConnectionFailure _       -> ConnectionRefused
+        ConnectionTimeout         -> RequestTimedOut
+        ResponseTimeout           -> RequestTimedOut
+        InternalException inner   ->
+          case show inner of
+            s | "getAddrInfo" `Text.isPrefixOf` Text.pack s -> DnsResolutionFailed
+            _                                               -> OtherNetworkError
+        _                         -> OtherNetworkError
+    Just (InvalidUrlException _ _) -> OtherNetworkError
+    Nothing                        -> OtherNetworkError
 -- ---------------------------------------------------------------------------
 -- HTTP export
 -- ---------------------------------------------------------------------------
@@ -189,10 +207,11 @@ doExport mgr req resourceAttrs scope spans = do
   let body = encodingToLazyByteString
                (encodeOtlpE resourceAttrs scope (NE.toList spans))
       req' = req { requestBody = RequestBodyLBS body }
+
   result <- try (httpLbs req' mgr)
   case result of
     Left (e :: SomeException) ->
-      pure (ExportFailure (EndpointUnreachable (Text.pack (show e))))
+      pure (ExportFailure (NetworkError (classifyException e) (Text.pack (show e))))
     Right resp ->
       let st = statusCode (responseStatus resp)
       in case mkHttpStatus st of

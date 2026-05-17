@@ -8,9 +8,9 @@ import Data.List.NonEmpty qualified as NE
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Test.Hspec
-
-import Trace.Export.Batch
 import Trace.Export.Types
+import Trace.Export.Batch
+
 import Trace.Generators
 
 -- ---------------------------------------------------------------------------
@@ -465,7 +465,7 @@ spec = do
       (logger, readWarns, _) <- capturingLogger
       let failExporter = noopExporter
             { exporterExport = \_ ->
-                pure (ExportFailure (EndpointUnreachable "test"))
+                pure (ExportFailure (NetworkError OtherNetworkError "test"))
             }
       Right batched <- batchExporter
         quietConfig
@@ -503,7 +503,7 @@ spec = do
             }
           failExporter = noopExporter
             { exporterExport = \_ ->
-                pure (ExportFailure (EndpointUnreachable "test"))
+                pure (ExportFailure (NetworkError OtherNetworkError "test"))
             }
       Right batched <- batchExporter
         quietConfig

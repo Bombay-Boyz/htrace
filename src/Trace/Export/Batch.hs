@@ -27,14 +27,16 @@ import Trace.Export.Types
 -- Configuration
 -- ---------------------------------------------------------------------------
 
+-- NEW
 data BatchConfig = BatchConfig
-  { maxQueueSize    :: !Int
-  , maxExportBatch  :: !Int
-  , exportInterval  :: !NominalDiffTime
-  , exportTimeout   :: !NominalDiffTime
-  , shutdownTimeout :: !NominalDiffTime
-  , onDroppedSpans  :: !(Int -> IO ())
-  , batchLogger     :: !InternalLogger
+  { maxQueueSize      :: !Int
+  , maxExportBatch    :: !Int
+  , exportInterval    :: !NominalDiffTime
+  , exportTimeout     :: !NominalDiffTime
+  , shutdownTimeout   :: !NominalDiffTime
+  , overflowStrategy  :: !OverflowStrategy
+  , onDroppedSpans    :: !(Int -> IO ())
+  , batchLogger       :: !InternalLogger
   }
 
 defaultOnDroppedSpans :: InternalLogger -> Int -> IO ()
@@ -44,15 +46,16 @@ defaultOnDroppedSpans logger n =
       <> Text.pack (show n)
       <> " spans (queue full)")
 
-defaultBatchConfig :: BatchConfig
+
 defaultBatchConfig = BatchConfig
-  { maxQueueSize    = 2048
-  , maxExportBatch  = 512
-  , exportInterval  = 5
-  , exportTimeout   = 30
-  , shutdownTimeout = 5
-  , onDroppedSpans  = defaultOnDroppedSpans stderrLogger
-  , batchLogger     = stderrLogger
+  { maxQueueSize     = 2048
+  , maxExportBatch   = 512
+  , exportInterval   = 5
+  , exportTimeout    = 30
+  , shutdownTimeout  = 5
+  , overflowStrategy = DropNewest
+  , onDroppedSpans   = defaultOnDroppedSpans stderrLogger
+  , batchLogger      = stderrLogger
   }
 
 -- ---------------------------------------------------------------------------
@@ -87,6 +90,18 @@ data ExporterState
   | Draining
   | Stopped
   deriving stock (Eq, Show)
+
+
+data EnqueueResult
+  = Enqueued    !Int        -- ^ all spans accepted
+  | PartialDrop !Int !Int   -- ^ (accepted, dropped)
+  | QueueClosed             -- ^ exporter is shutting down
+  deriving stock (Show, Eq)
+
+enqueueResultToExport :: EnqueueResult -> ExportResult
+enqueueResultToExport (Enqueued n)       = ExportSuccess n
+enqueueResultToExport (PartialDrop n _)  = ExportSuccess n
+enqueueResultToExport QueueClosed        = ExportFailure ExporterShutDown
 
 -- ---------------------------------------------------------------------------
 -- Constructor
@@ -161,6 +176,7 @@ batchExporter cfg inner =
     -- Enqueue
     -- -----------------------------------------------------------------------
 
+    -- NEW
     guardedEnqueue
       :: TVar ExporterState
       -> TBQueue WorkItem
@@ -168,31 +184,47 @@ batchExporter cfg inner =
       -> NonEmpty FinishedSpan
       -> IO ExportResult
     guardedEnqueue stateVar queue dropCounter ne =
-      atomically $ do
+      fmap enqueueResultToExport $ atomically $ do
         st <- readTVar stateVar
         case st of
           Running  -> enqueueSTM queue dropCounter ne
-          Draining -> pure (ExportFailure ExporterShutDown)
-          Stopped  -> pure (ExportFailure ExporterShutDown)
+          Draining -> pure QueueClosed
+          Stopped  -> pure QueueClosed
 
+
+
+    -- NEW
     enqueueSTM
       :: TBQueue WorkItem
       -> TVar Int
       -> NonEmpty FinishedSpan
-      -> STM ExportResult
+      -> STM EnqueueResult
     enqueueSTM queue dropCounter ne = do
-      let xs         = NE.toList ne
-          n          = length xs
-      occupied <- lengthTBQueue queue
-      let space      = maxQueueSize cfg - fromIntegral occupied
-          canEnqueue = min n space
-          nDropped   = n - canEnqueue
-      case NE.nonEmpty (take canEnqueue xs) of
-        Just batch -> writeTBQueue queue (SpanItem batch)
-        Nothing    -> pure ()
-      when (nDropped > 0) $
-        modifyTVar' dropCounter (+ nDropped)
-      pure (ExportSuccess (n - nDropped))
+      let xs = NE.toList ne
+          n  = length xs
+      case overflowStrategy cfg of
+        DropNewest -> do
+          occupied <- lengthTBQueue queue
+          let space      = maxQueueSize cfg - fromIntegral occupied
+              canEnqueue = min n space
+              nDropped   = n - canEnqueue
+          case NE.nonEmpty (take canEnqueue xs) of
+            Just batch -> writeTBQueue queue (SpanItem batch)
+            Nothing    -> pure ()
+          when (nDropped > 0) $
+            modifyTVar' dropCounter (+ nDropped)
+          if nDropped > 0
+            then pure (PartialDrop (n - nDropped) nDropped)
+            else pure (Enqueued n)
+        
+        DropOldest -> do
+          full <- isFullTBQueue queue
+          when full $ void (tryReadTBQueue queue)
+          writeTBQueue queue (SpanItem ne)
+          pure (Enqueued n)
+        BlockProducer -> do
+          writeTBQueue queue (SpanItem ne)
+          pure (Enqueued n)
 
     -- -----------------------------------------------------------------------
     -- Flush
