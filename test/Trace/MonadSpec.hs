@@ -14,7 +14,6 @@ import Trace.Core
 import Trace.Export.Types
 import Trace.Monad
 import Trace.Generators
-import Control.Exception (evaluate)
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -36,7 +35,7 @@ withCapturedSpan
 withCapturedSpan action = do
   (exporter, readAll) <- memoryExporter
   let tracer = mkTestTracer exporter
-  inSpan tracer "test" Internal mempty (action tracer)
+  inSpan tracer (mkTestSpanName "test") Internal mempty (action tracer)
   spans <- readAll
   case spans of
     (s:_) -> pure s
@@ -53,14 +52,14 @@ spec = do
     it "exports span on normal return" $ do
       (exporter, readAll) <- memoryExporter
       let tracer = mkTestTracer exporter
-      inSpan tracer "t" Internal mempty (\_ -> pure ())
+      inSpan tracer (mkTestSpanName "t") Internal mempty (\_ -> pure ())
       spans <- readAll
       length spans `shouldBe` 1
 
     it "exports span when body throws" $ do
       (exporter, readAll) <- memoryExporter
       let tracer = mkTestTracer exporter
-      _ <- (inSpan tracer "t" Internal mempty
+      _ <- (inSpan tracer (mkTestSpanName "t") Internal mempty
               (\_ -> fail "boom" :: IO ()) :: IO ())
              `shouldThrow` anyException
       spans <- readAll
@@ -69,7 +68,7 @@ spec = do
     it "re-raises exception after finalising" $ do
       (exporter, _) <- memoryExporter
       let tracer = mkTestTracer exporter
-      let action = inSpan tracer "t" Internal mempty
+      let action = inSpan tracer (mkTestSpanName "t") Internal mempty
                      (\_ -> ioError (userError "boom"))
       action `shouldThrow` anyIOException
 
@@ -81,7 +80,7 @@ spec = do
       (exporter, readAll) <- memoryExporter
       let tracer = (mkTestTracer exporter)
                      { tracerSampler = alwaysOffSampler }
-      inSpan tracer "t" Internal mempty (\_ -> pure ())
+      inSpan tracer (mkTestSpanName "t") Internal mempty (\_ -> pure ())
       spans <- readAll
       length spans `shouldBe` 0
 
@@ -97,7 +96,7 @@ spec = do
       (exporter, _) <- memoryExporter
       let tracer = mkTestTracer exporter
       spRef <- newIORef (error "uninitialised")
-      inSpan tracer "t" Internal mempty $ \sp -> writeIORef spRef sp
+      inSpan tracer (mkTestSpanName "t") Internal mempty $ \sp -> writeIORef spRef sp
       sp <- readIORef spRef
       result <- setSpanAttr sp (AttrKey "k") (AttrString "v")
       result `shouldBe` Left SpanAlreadyEnded
@@ -106,7 +105,7 @@ spec = do
       (exporter, _) <- memoryExporter
       let tracer = (mkTestTracer exporter)
                      { tracerSampler = alwaysOffSampler }
-      result <- inSpan tracer "t" Internal mempty $ \sp ->
+      result <- inSpan tracer (mkTestSpanName "t") Internal mempty $ \sp ->
         setSpanAttr sp (AttrKey "k") (AttrString "v")
       result `shouldBe` Left SpanWasDropped
 
@@ -154,7 +153,7 @@ spec = do
       (exporter, _) <- memoryExporter
       let tracer = mkTestTracer exporter
       spRef <- newIORef (error "uninitialised")
-      inSpan tracer "t" Internal mempty $ \sp -> writeIORef spRef sp
+      inSpan tracer (mkTestSpanName "t") Internal mempty $ \sp -> writeIORef spRef sp
       sp <- readIORef spRef
       result <- addEvent sp "late" mempty
       result `shouldBe` Left SpanAlreadyEnded
@@ -183,8 +182,6 @@ spec = do
     it "sets both status and event atomically — both present or neither" $ do
       fs <- withCapturedSpan $ \_ sp ->
         void $ recordException sp (userError "atomic-test")
-      -- Both must be present. If non-atomic, a race could produce one
-      -- without the other.
       case fsStatus fs of
         StatusError _ -> pure ()
         other ->
@@ -199,10 +196,10 @@ spec = do
       (exporter, _) <- memoryExporter
       let tracer = mkTestTracer exporter
       spRef <- newIORef (error "uninitialised")
-      inSpan tracer "t" Internal mempty $ \sp -> writeIORef spRef sp
+      inSpan tracer (mkTestSpanName "t") Internal mempty $ \sp -> writeIORef spRef sp
       sp <- readIORef spRef
       result <- recordException sp (userError "too late")
-      result `shouldBe` Left SpanAlreadyEnded      
+      result `shouldBe` Left SpanAlreadyEnded
 
   describe "inSpanM" $ do
     it "child span inherits trace ID from parent" $ do
@@ -210,8 +207,8 @@ spec = do
       let tracer = mkTestTracer exporter
           ctx    = TraceContext Nothing tracer
       runReaderT
-        ( inSpanM "parent" Internal mempty $ \_ ->
-            inSpanM "child" Internal mempty $ \_ -> pure ()
+        ( inSpanM (mkTestSpanName "parent") Internal mempty $ \_ ->
+            inSpanM (mkTestSpanName "child") Internal mempty $ \_ -> pure ()
         )
         ctx
       spans <- readAll
@@ -226,8 +223,8 @@ spec = do
       let tracer = mkTestTracer exporter
           ctx    = TraceContext Nothing tracer
       runReaderT
-        ( inSpanM "parent" Internal mempty $ \parent ->
-            inSpanM "child" Internal mempty $ \_ -> do
+        ( inSpanM (mkTestSpanName "parent") Internal mempty $ \parent ->
+            inSpanM (mkTestSpanName "child") Internal mempty $ \_ -> do
               ambientCtx <- getCurrentSpanContext
               liftIO $ case ambientCtx of
                 Nothing -> expectationFailure "expected a span context"
@@ -264,7 +261,7 @@ spec = do
     it "returns SpanActive while span is open" $ do
       (exporter, _) <- memoryExporter
       let tracer = mkTestTracer exporter
-      inSpan tracer "r1-active" Internal mempty $ \sp -> do
+      inSpan tracer (mkTestSpanName "r1-active") Internal mempty $ \sp -> do
         si <- readSpanInternals sp
         case siState si of
           SpanActive _ -> pure ()
@@ -274,7 +271,7 @@ spec = do
     it "reflects setSpanAttr immediately" $ do
       (exporter, _) <- memoryExporter
       let tracer = mkTestTracer exporter
-      inSpan tracer "r1-attr" Internal mempty $ \sp -> do
+      inSpan tracer (mkTestSpanName "r1-attr") Internal mempty $ \sp -> do
         result <- setSpanAttr sp (AttrKey "key1") (AttrString "val1")
         result `shouldBe` Right ()
         si <- readSpanInternals sp
@@ -284,7 +281,7 @@ spec = do
     it "shows exported span has StatusUnset when no status set" $ do
       (exporter, readAll) <- memoryExporter
       let tracer = mkTestTracer exporter
-      inSpan tracer "r1-ended" Internal mempty (\_ -> pure ())
+      inSpan tracer (mkTestSpanName "r1-ended") Internal mempty (\_ -> pure ())
       spans <- readAll
       case spans of
         [fs] -> fsStatus fs `shouldBe` StatusUnset
@@ -298,16 +295,7 @@ spec = do
       mkSpanName "   " `shouldBe` Nothing
 
     it "mkSpanName accepts non-blank text" $
-      mkSpanName "checkout" `shouldBe` Just (SpanName "checkout")
-
-        -- NEW
-    it "IsString instance errors on empty string literal" $ do
-      evaluate ("" :: SpanName) `shouldThrow` errorCall
-        "SpanName.fromString: empty or whitespace-only span name. Use mkSpanName for a safe constructor."
-
-    it "IsString instance errors on whitespace-only literal" $ do
-      evaluate ("   " :: SpanName) `shouldThrow` errorCall
-        "SpanName.fromString: empty or whitespace-only span name. Use mkSpanName for a safe constructor."
+      mkSpanName "checkout" `shouldBe` Just (mkTestSpanName "checkout")
 
 -- ---------------------------------------------------------------------------
 -- Properties
@@ -317,7 +305,7 @@ prop_inSpan_start_le_end :: IO ()
 prop_inSpan_start_le_end = do
   (exporter, readAll) <- memoryExporter
   let tracer = mkTestTracer exporter
-  inSpan tracer "t" Internal mempty (\_ -> pure ())
+  inSpan tracer (mkTestSpanName "t") Internal mempty (\_ -> pure ())
   spans <- readAll
   case spans of
     [fs] -> fsStartTime fs `shouldSatisfy` (<= fsEndTime fs)
@@ -329,7 +317,7 @@ prop_setSpanAttr_atomic = do
   (exporter, readAll) <- memoryExporter
   let tracer = mkTestTracer exporter
   ackedKeys <- newIORef ([] :: [AttrKey])
-  inSpan tracer "t" Internal mempty $ \sp -> do
+  inSpan tracer (mkTestSpanName "t") Internal mempty $ \sp -> do
     mvars <- sequence (replicate n newEmptyMVar)
     mapM_
       ( \(i, mv) -> forkIO $ do

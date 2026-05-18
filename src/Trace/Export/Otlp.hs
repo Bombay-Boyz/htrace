@@ -17,6 +17,8 @@ module Trace.Export.Otlp
 
 import Data.ByteString (ByteString)
 import Control.Exception (fromException)
+import System.IO.Error   (isDoesNotExistError, ioeGetErrorType)
+import GHC.IO.Exception  (IOErrorType (NoSuchThing))
 import Data.Aeson (Value (..), object, (.=))
 import Data.Aeson.Encoding
   ( Encoding
@@ -175,16 +177,24 @@ classifyException e =
   case fromException e of
     Just (HttpExceptionRequest _ content) ->
       case content of
-        ConnectionFailure _       -> ConnectionRefused
+        ConnectionFailure inner   -> classifyConnectionFailure inner
         ConnectionTimeout         -> RequestTimedOut
         ResponseTimeout           -> RequestTimedOut
-        InternalException inner   ->
-          case show inner of
-            s | "getAddrInfo" `Text.isPrefixOf` Text.pack s -> DnsResolutionFailed
-            _                                               -> OtherNetworkError
         _                         -> OtherNetworkError
     Just (InvalidUrlException _ _) -> OtherNetworkError
     Nothing                        -> OtherNetworkError
+
+-- | Inspect the underlying 'IOError' from a connection failure to distinguish
+-- DNS errors (no such host) from refused connections and other failures.
+-- Uses structured IOError predicates from 'System.IO.Error' rather than
+-- fragile string matching on 'show' output, which is implementation-defined
+-- and can change between 'network' package versions or platforms.
+classifyConnectionFailure :: SomeException -> NetworkFailure
+classifyConnectionFailure inner =
+  case fromException inner of
+    Just ioErr
+      | isDoesNotExistError ioErr -> DnsResolutionFailed
+    _                             -> ConnectionRefused
 -- ---------------------------------------------------------------------------
 -- HTTP export
 -- ---------------------------------------------------------------------------

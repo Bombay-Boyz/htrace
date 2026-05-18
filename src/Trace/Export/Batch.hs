@@ -39,6 +39,20 @@ data BatchConfig = BatchConfig
   , batchLogger       :: !InternalLogger
   }
 
+-- | Two 'TracingConfig' values are equal when all fields except
+-- 'configLogger' are equal. 'configLogger' is excluded because it is
+-- a function and functions cannot be compared for equality.
+-- 'configBatch' is included; its function fields ('onDroppedSpans',
+-- 'batchLogger') are excluded within its own 'Eq' instance.
+instance Eq BatchConfig where
+  a == b =
+    maxQueueSize     a == maxQueueSize     b
+    && maxExportBatch  a == maxExportBatch  b
+    && exportInterval  a == exportInterval  b
+    && exportTimeout   a == exportTimeout   b
+    && shutdownTimeout a == shutdownTimeout b
+    && overflowStrategy a == overflowStrategy b
+
 defaultOnDroppedSpans :: InternalLogger -> Int -> IO ()
 defaultOnDroppedSpans logger n =
   logWarn logger

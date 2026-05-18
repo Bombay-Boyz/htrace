@@ -127,12 +127,17 @@ memoryExporter = do
 
   let doExport ne = do
         atomically $
-          modifyTVar' tvar (<> NE.toList ne)
+          -- Prepend in O(1) rather than append in O(n).
+          -- The list is stored in reverse export order and
+          -- corrected once in readAll.
+          modifyTVar' tvar (NE.toList ne ++)
 
         pure (ExportSuccess (NE.length ne))
 
-      readAll =
-        (readTVarIO tvar)
+      -- Reverse once here: O(n) on read vs O(n^2) total for n export
+      -- calls with append. Callers see spans in export (arrival) order,
+      -- which is what the parent/child ordering tests rely on.
+      readAll = fmap reverse (readTVarIO tvar)
 
   pure
     ( SpanExporter

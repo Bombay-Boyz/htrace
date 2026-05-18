@@ -11,7 +11,6 @@ import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Trace.Core
 import Trace.Generators
-import Control.Exception (evaluate)
 
 spec :: Spec
 spec = do
@@ -112,14 +111,6 @@ spec = do
     it "mkSpanName accepts emoji" $
       mkSpanName "🦀" `shouldBe` Just (SpanName "🦀")
 
-    
-    it "errors on empty string" $ do
-      evaluate ("" :: SpanName) `shouldThrow` errorCall
-       "SpanName.fromString: empty or whitespace-only span name. Use mkSpanName for a safe constructor."
-
-    it "IsString accepts a non-empty string" $
-      ("my-span" :: SpanName) `shouldBe` SpanName "my-span"
-
   describe "ErrorMessage" $ do
     it "mkErrorMessage rejects empty string" $
       mkErrorMessage "" `shouldBe` Nothing
@@ -140,25 +131,25 @@ spec = do
   describe "Sampler" $ do
     it "alwaysOnSampler returns RecordAndSample" $ do
       tid <- newTraceId
-      runSampler alwaysOnSampler Nothing tid "n" Internal mempty
+      runSampler alwaysOnSampler Nothing tid (mkTestSpanName "n") Internal mempty
         `shouldBe` RecordAndSample
 
     it "alwaysOffSampler returns Drop" $ do
       tid <- newTraceId
-      runSampler alwaysOffSampler Nothing tid "n" Internal mempty
+      runSampler alwaysOffSampler Nothing tid (mkTestSpanName "n") Internal mempty
         `shouldBe` Drop
 
     it "traceIdRatioSampler 1.0 always samples" $ do
       tids <- replicateM 100 newTraceId
       let s = traceIdRatioSampler 1.0
-      all (\tid -> runSampler s Nothing tid "n" Internal mempty
+      all (\tid -> runSampler s Nothing tid (mkTestSpanName "n") Internal mempty
                      == RecordAndSample) tids
         `shouldBe` True
 
     it "traceIdRatioSampler 0.0 never samples" $ do
       tids <- replicateM 100 newTraceId
       let s = traceIdRatioSampler 0.0
-      all (\tid -> runSampler s Nothing tid "n" Internal mempty
+      all (\tid -> runSampler s Nothing tid (mkTestSpanName "n") Internal mempty
                      == Drop) tids
         `shouldBe` True
 
@@ -181,44 +172,44 @@ spec = do
     it "rate 0.0 samples nothing" $ do
       tids <- replicateM 200 newTraceId
       let s = traceIdRatioSampler 0.0
-      all (\t -> runSampler s Nothing t "n" Internal mempty == Drop) tids
+      all (\t -> runSampler s Nothing t (mkTestSpanName "n") Internal mempty == Drop) tids
         `shouldBe` True
 
     it "rate 1.0 samples everything" $ do
       tids <- replicateM 200 newTraceId
       let s = traceIdRatioSampler 1.0
-      all (\t -> runSampler s Nothing t "n" Internal mempty == RecordAndSample) tids
+      all (\t -> runSampler s Nothing t (mkTestSpanName "n") Internal mempty == RecordAndSample) tids
         `shouldBe` True
 
     it "negative rate clamps to 0 — samples nothing" $ do
       tids <- replicateM 100 newTraceId
       let s = traceIdRatioSampler (-1.0)
-      all (\t -> runSampler s Nothing t "n" Internal mempty == Drop) tids
+      all (\t -> runSampler s Nothing t (mkTestSpanName "n") Internal mempty == Drop) tids
         `shouldBe` True
 
     it "rate > 1 clamps to 1 — samples everything" $ do
       tids <- replicateM 100 newTraceId
       let s = traceIdRatioSampler 2.0
-      all (\t -> runSampler s Nothing t "n" Internal mempty == RecordAndSample) tids
+      all (\t -> runSampler s Nothing t (mkTestSpanName "n") Internal mempty == RecordAndSample) tids
         `shouldBe` True
 
     it "is deterministic for the same trace-id" $ do
       tid <- newTraceId
       let s = traceIdRatioSampler 0.5
-      runSampler s Nothing tid "n" Internal mempty
-        `shouldBe` runSampler s Nothing tid "n" Internal mempty
+      runSampler s Nothing tid (mkTestSpanName "n") Internal mempty
+        `shouldBe` runSampler s Nothing tid (mkTestSpanName "n") Internal mempty
 
   describe "parentBasedSampler" $ do
     it "no parent: delegates to root sampler — alwaysOn" $ do
       tid <- newTraceId
       let s = parentBasedSampler alwaysOnSampler
-      runSampler s Nothing tid "n" Internal mempty
+      runSampler s Nothing tid (mkTestSpanName "n") Internal mempty
         `shouldBe` RecordAndSample
 
     it "no parent: delegates to root sampler — alwaysOff" $ do
       tid <- newTraceId
       let s = parentBasedSampler alwaysOffSampler
-      runSampler s Nothing tid "n" Internal mempty
+      runSampler s Nothing tid (mkTestSpanName "n") Internal mempty
         `shouldBe` Drop
 
     it "sampled parent gives RecordAndSample regardless of root" $ do
@@ -226,7 +217,7 @@ spec = do
       sid <- newSpanId
       let sampledCtx = SpanContext tid sid Nothing (setSampled True defaultTraceFlags)
           s          = parentBasedSampler alwaysOffSampler
-      runSampler s (Just sampledCtx) tid "n" Internal mempty
+      runSampler s (Just sampledCtx) tid (mkTestSpanName "n") Internal mempty
         `shouldBe` RecordAndSample
 
     it "unsampled parent gives Drop regardless of root" $ do
@@ -234,7 +225,7 @@ spec = do
       sid <- newSpanId
       let unsampledCtx = SpanContext tid sid Nothing defaultTraceFlags
           s            = parentBasedSampler alwaysOnSampler
-      runSampler s (Just unsampledCtx) tid "n" Internal mempty
+      runSampler s (Just unsampledCtx) tid (mkTestSpanName "n") Internal mempty
         `shouldBe` Drop
 
   -- -------------------------------------------------------------------------
@@ -314,7 +305,7 @@ prop_parentBased_inherits_parent_decision :: H.PropertyT IO ()
 prop_parentBased_inherits_parent_decision = do
   ctx <- forAll genSpanContext
   let s      = parentBasedSampler alwaysOnSampler
-      result = runSampler s (Just ctx) (scTraceId ctx) "n" Internal mempty
+      result = runSampler s (Just ctx) (scTraceId ctx) (mkTestSpanName "n") Internal mempty
   if isSampled (scTraceFlags ctx)
     then result === RecordAndSample
     else result === Drop
@@ -325,6 +316,6 @@ prop_parentBased_no_parent_delegates = do
   rate <- forAll (Gen.double (Range.linearFrac 0.0 1.0))
   let root   = traceIdRatioSampler rate
       pBased = parentBasedSampler root
-      direct = runSampler root   Nothing tid "n" Internal mempty
-      via    = runSampler pBased Nothing tid "n" Internal mempty
+      direct = runSampler root   Nothing tid (mkTestSpanName "n") Internal mempty
+      via    = runSampler pBased Nothing tid (mkTestSpanName "n") Internal mempty
   direct === via

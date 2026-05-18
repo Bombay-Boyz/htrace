@@ -19,6 +19,7 @@ module Trace.Generators
   , sampleAttrs
   , sampleFinishedSpan
   , sampleSpan
+  , mkTestSpanName
   , genNonTraceparentHeader
   ) where
 
@@ -41,7 +42,7 @@ import Network.HTTP.Types (Header)
 
 -- ---------------------------------------------------------------------------
 -- ID generators
--- ---------------------------------------------------------------------------
+-- -------------------import Trace.Core--------------------------------------------------------
 
 genTraceId :: Gen TraceId
 genTraceId = do
@@ -211,7 +212,7 @@ sampleFinishedSpan = FinishedSpan
       , scParentId   = Nothing
       , scTraceFlags = setSampled True defaultTraceFlags
       }
-  , fsName       = SpanName "sample"
+  , fsName       = mkTestSpanName "sample"
   , fsKind       = Internal
   , fsStartTime  = UTCTime (fromGregorian 2025 1 1) 0
   , fsEndTime    = UTCTime (fromGregorian 2025 1 1) 1
@@ -226,3 +227,8 @@ sampleSpan i = sampleFinishedSpan
   { fsName       = SpanName (Text.pack ("span-" <> show i))
   , fsAttributes = attrs [(AttrKey "i", AttrInt (fromIntegral i))]
   }
+
+mkTestSpanName :: String -> SpanName
+mkTestSpanName s = case mkSpanName (Text.pack s) of
+  Just n  -> n
+  Nothing -> error ("mkTestSpanName: blank span name in test code: " <> show s)

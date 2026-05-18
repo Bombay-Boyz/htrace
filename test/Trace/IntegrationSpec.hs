@@ -8,6 +8,7 @@ import Trace.Attributes
 import Trace.Config
 import Trace.Core
 import Trace.Export.Types
+import Trace.Generators (mkTestSpanName)
 import Trace.Monad
 
 -- ---------------------------------------------------------------------------
@@ -47,8 +48,8 @@ spec = do
             , tracerLogger   = silentLogger
             }
       runReaderT
-        ( inSpanM "parent" Internal mempty $ \_ ->
-            inSpanM "child"  Internal mempty $ \_ -> pure ()
+        ( inSpanM (mkTestSpanName "parent") Internal mempty $ \_ ->
+            inSpanM (mkTestSpanName "child")  Internal mempty $ \_ -> pure ()
         )
         (TraceContext Nothing tracer)
       spans <- readAll
@@ -69,8 +70,8 @@ spec = do
             , tracerLogger   = silentLogger
             }
       runReaderT
-        ( inSpanM "parent" Internal mempty $ \_ ->
-            inSpanM "child"  Internal mempty $ \_ -> pure ()
+        ( inSpanM (mkTestSpanName "parent") Internal mempty $ \_ ->
+            inSpanM (mkTestSpanName "child")  Internal mempty $ \_ -> pure ()
         )
         (TraceContext Nothing tracer)
       spans <- readAll
@@ -90,7 +91,7 @@ spec = do
             , tracerClock    = systemClock
             , tracerLogger   = silentLogger
             }
-      inSpan tracer "t" Internal mempty (\_ -> pure ())
+      inSpan tracer (mkTestSpanName "t") Internal mempty (\_ -> pure ())
       spans <- readAll
       length spans `shouldBe` 1
 
@@ -104,7 +105,7 @@ spec = do
             , tracerClock    = systemClock
             , tracerLogger   = silentLogger
             }
-      inSpan tracer "t" Internal mempty (\_ -> pure ())
+      inSpan tracer (mkTestSpanName "t") Internal mempty (\_ -> pure ())
       spans <- readAll
       length spans `shouldBe` 0
 
@@ -125,7 +126,7 @@ spec = do
             , tracerClock    = systemClock
             , tracerLogger   = silentLogger
             }
-      inSpan tracer "facade-test" Internal
+      inSpan tracer (mkTestSpanName "facade-test") Internal
         (attrs [(AttrKey "test", AttrString "yes")])
         (\_ -> pure ())
       spans <- readAll

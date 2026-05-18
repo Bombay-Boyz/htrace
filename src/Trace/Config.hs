@@ -184,13 +184,15 @@ instance Show TracingConfig where
     <> ", logger = <function> }"
 
 -- | Two 'TracingConfig' values are equal when all fields except
--- 'configLogger' and 'configBatch' are equal (functions cannot be compared).
+-- 'configLogger' are equal. 'configLogger' is excluded because it is
+-- a function and functions cannot be compared for equality.
 instance Eq TracingConfig where
   a == b =
     configExporter    a == configExporter    b
     && configSampler     a == configSampler     b
     && configResource    a == configResource    b
     && configPropagators a == configPropagators b
+    && configBatch       a == configBatch       b
 
 -- | Safe defaults: noop exporter, always sample, default resource.
 defaultConfig :: TracingConfig
@@ -393,16 +395,17 @@ loadOtlpConfig = do
         Nothing -> Success []
         Just s  -> parseHeaderList (Text.pack s)
 
+      -- OTEL spec: OTEL_EXPORTER_OTLP_TIMEOUT is in milliseconds (default 10000 ms = 10 s).
       vTimeout = case timeoutVar of
         Nothing -> Success 10
         Just s  -> case TR.double (Text.pack s) of
           Right (d, rest) | Text.null rest && d > 0 ->
-            Success (realToFrac d)
+            Success (realToFrac (d / 1000 :: Double))
           _ -> Failure $ NE.singleton $
             InvalidVarValue
               (EnvVarName "OTEL_EXPORTER_OTLP_TIMEOUT")
               (Text.pack s)
-              "expected a positive number of seconds"
+              "expected a positive number of milliseconds"
       
       
       vCompression = case compressionVar of
