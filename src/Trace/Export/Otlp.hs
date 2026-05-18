@@ -7,7 +7,7 @@ module Trace.Export.Otlp
     -- | Note: only 'NoCompression' is currently supported.
     -- 'GzipCompression' is defined but not exported; it will be added
     -- to the public API once implemented.
-  , Compression (NoCompression)
+  , Compression (..)
   , OtlpConfig (..)
     -- * Constructor
   , otlpExporter
@@ -92,8 +92,7 @@ mkEndpoint t =
 -- type-correct code that always fails at runtime (M-3).
 data Compression
   = NoCompression
-  | GzipCompression   -- not exported; see module header
-  deriving stock (Show, Eq)
+ deriving stock (Show, Eq)
 
 -- | Configuration for the OTLP/HTTP JSON exporter.
 data OtlpConfig = OtlpConfig
@@ -138,12 +137,7 @@ otlpExporter
   -> InstrumentationScope
   -> IO (Either ExporterInitError SpanExporter)
 otlpExporter cfg resourceAttrs scope =
-  case otlpCompression cfg of
-    GzipCompression ->
-      pure (Left (ExporterUnsupportedCompression
-        "GzipCompression is not yet implemented; use NoCompression"))
-    NoCompression ->
-      case validateHeaders (otlpHeaders cfg) of
+  case validateHeaders (otlpHeaders cfg) of
         Left e   -> pure (Left e)
         Right hs -> do
           mgr  <- newManager tlsManagerSettings

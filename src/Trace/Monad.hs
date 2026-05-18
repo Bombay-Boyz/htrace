@@ -7,7 +7,7 @@ module Trace.Monad
     -- * Span creation
   , inSpan
   , inSpanM
-  , inSpanCore
+  
     -- * Mutators
   , setSpanAttr
   , setSpanAttrs
@@ -20,7 +20,7 @@ module Trace.Monad
     -- * Utilities
   , getCurrentSpanContext
   , flush
-  , modifySpan
+  
   ) where
 
 import Control.Concurrent.STM (atomically, readTVar, writeTVar, newTVarIO)

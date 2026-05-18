@@ -46,7 +46,7 @@ defaultOnDroppedSpans logger n =
       <> Text.pack (show n)
       <> " spans (queue full)")
 
-
+defaultBatchConfig :: BatchConfig
 defaultBatchConfig = BatchConfig
   { maxQueueSize     = 2048
   , maxExportBatch   = 512

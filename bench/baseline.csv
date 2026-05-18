@@ -1,0 +1,6 @@
+-- Run `cabal bench --benchmark-options="--csv bench/baseline.csv"` on your
+-- reference machine to populate this file.
+-- Commit the result so CI can detect performance regressions via
+-- `--baseline bench/baseline.csv`.
+-- Document the hardware used (CPU model, RAM, OS) in a comment here.
+-- Example reference: Intel Core i7-12700K, 32 GB DDR5, Ubuntu 24.04 LTS
